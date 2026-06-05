@@ -27,36 +27,37 @@ async def live_flights(
     max_lat: float = 23.5,
 ):
     try:
-        url = "https://opensky-network.org/api/states/all"
-        params = {"lamin": min_lat, "lomin": min_lon, "lamax": max_lat, "lomax": max_lon}
+        center_lat = (min_lat + max_lat) / 2
+        center_lon = (min_lon + max_lon) / 2
+        url = f"https://opendata.adsb.fi/api/v2/lat/{center_lat}/lon/{center_lon}/dist/250"
 
         async with httpx.AsyncClient() as client:
-            resp = await client.get(
-                url,
-                params=params,
-                auth=(OPENSKY_USER, OPENSKY_PASS),
-                timeout=20,
-            )
+            resp = await client.get(url, timeout=20)
 
         if resp.status_code != 200:
-            return {"flights": [], "error": f"OpenSky returned {resp.status_code}", "total": 0}
+            return {"flights": [], "error": f"adsb.fi returned {resp.status_code}", "total": 0}
 
-        data = resp.json()
-        states = data.get("states") or []
+        aircraft = resp.json().get("aircraft") or []
         flights = []
-        for s in states:
-            if s[5] is None or s[6] is None:
+        for ac in aircraft:
+            lat = ac.get("lat")
+            lon = ac.get("lon")
+            if lat is None or lon is None:
                 continue
+            if not (min_lat <= lat <= max_lat and min_lon <= lon <= max_lon):
+                continue
+            alt = ac.get("alt_baro") or ac.get("alt_geom")
+            on_ground = isinstance(alt, str) and alt == "ground"
             flights.append({
-                "icao24":        s[0],
-                "callsign":      (s[1] or "").strip(),
-                "longitude":     s[5],
-                "latitude":      s[6],
-                "altitude":      s[7],
-                "on_ground":     s[8],
-                "velocity":      s[9],
-                "heading_deg":   s[10],
-                "vertical_rate": s[11],
+                "icao24":        ac.get("hex", ""),
+                "callsign":      (ac.get("flight") or "").strip(),
+                "longitude":     lon,
+                "latitude":      lat,
+                "altitude":      None if on_ground else alt,
+                "on_ground":     on_ground,
+                "velocity":      ac.get("gs"),
+                "heading_deg":   ac.get("track"),
+                "vertical_rate": ac.get("baro_rate"),
             })
 
         return {"flights": flights, "total": len(flights)}
