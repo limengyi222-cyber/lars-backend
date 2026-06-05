@@ -62,7 +62,7 @@ async def live_flights(
         return {"flights": flights, "total": len(flights)}
 
     except Exception as e:
-        return {"flights": [], "error": str(e), "total": 0}
+        return {"flights": [], "error": f"{type(e).__name__}: {e}", "total": 0}
 
 
 @app.get("/health")
