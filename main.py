@@ -1,7 +1,9 @@
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
 import os
+import json
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -64,6 +66,18 @@ async def live_flights(
 
     except Exception as e:
         return {"flights": [], "error": f"{type(e).__name__}: {e}", "total": 0}
+
+
+_GRIDS_CACHE = None
+
+@app.get("/api/v1/airspace/grids")
+async def airspace_grids():
+    global _GRIDS_CACHE
+    if _GRIDS_CACHE is None:
+        grid_path = os.path.join(os.path.dirname(__file__), "gba_grids.json")
+        with open(grid_path, "r") as f:
+            _GRIDS_CACHE = f.read()
+    return JSONResponse(content=json.loads(_GRIDS_CACHE))
 
 
 @app.get("/health")
