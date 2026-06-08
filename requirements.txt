@@ -2,3 +2,7 @@ fastapi
 uvicorn[standard]
 httpx
 python-dotenv
+numpy
+scipy
+scikit-learn
+networkx
