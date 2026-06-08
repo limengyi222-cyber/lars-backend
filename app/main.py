@@ -56,22 +56,26 @@ _GRIDS_CACHE = None
 # ═══════════════════════════════════════════════════
 
 class CREAMRequest(BaseModel):
-    """CREAM 三维碰撞风险请求（ICAO Doc 9689）"""
-    Sx: float = Field(2.0, description="纵向间隔 (NM)")
-    Sy: float = Field(0.5, description="侧向间隔 / 走廊宽度 (NM)")
-    Sz: float = Field(30.0, description="垂直间隔 (ft)")
-    RNP: float = Field(0.1, description="导航精度 RNP (NM)")
-    V: float = Field(30.0, description="平均速度 (knots)")
+    """CREAM 三维碰撞风险请求（ICAO Doc 9689 + NTU ATMRI v2.1）"""
+    Sx: float = Field(2.0,   description="纵向间隔 (NM)")
+    Sy: float = Field(0.5,   description="侧向间隔 / 走廊宽度 (NM)")
+    Sz: float = Field(30.0,  description="垂直间隔 (ft)")
+    RNP: float = Field(0.1,  description="导航精度 RNP (NM)")
+    V: float = Field(30.0,   description="平均速度 (knots)")
     y_dot: float = Field(5.0, description="侧向速率 (knots)")
     z_dot: float = Field(2.0, description="垂直速率 (ft/min)")
     lambda_x: float = Field(0.003, description="纵向机身半长 (NM)")
     lambda_y: float = Field(0.003, description="侧向机身半宽 (NM)")
     lambda_z: float = Field(0.002, description="垂直机身半高 (NM)")
     lambda_xy: float = Field(0.003, description="水平截面特征尺寸 (NM)")
-    sigma_aad: float = Field(5.0, description="AAD 标准差 (ft)")
-    sigma_ase: float = Field(3.0, description="ASE 标准差 (ft)")
-    Pz_0: float = Field(0.6, description="垂直重叠概率 Pz(0)")
-    Ey_opp: float = Field(0.3, description="对向飞行暴露量")
+    sigma_aad: float = Field(5.0, description="AAD 标准差 (ft) — 实际高度偏差")
+    sigma_ase: float = Field(3.0, description="ASE 标准差 (ft) — 高度表系统误差")
+    Pz_0: float = Field(0.0,  description="保留字段（v2.1 已从 TVE 模型自动计算，传 0 即可）")
+    Ey_opp: float = Field(0.3, description="对向飞行暴露量 (0~1)")
+    # ── v2.1 新增参数 ──────────────────────────────────────
+    N_ac: float = Field(10.0,   description="评估期内走廊飞行架次（用于推导 n_z_equiv）")
+    T_period: float = Field(3600.0, description="评估时间窗口 (s)")
+    delta_V: float = Field(0.0, description="同向速度偏差 (knots)；0 = 自动取 5%V")
 
 
 class UAVCollisionRequest(BaseModel):
