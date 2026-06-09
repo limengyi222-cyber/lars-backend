@@ -35,6 +35,7 @@ from .engines.network_engine import analyze_airway_network
 from .engines.complexity_engine import compute_airspace_complexity
 from .engines.crossing_detector import detect_crossings
 from .engines.terrain_engine import compute_terrain_analysis
+from .engines.airspace_engine import check_route_airspace
 
 app = FastAPI(
     title="LARS API",
@@ -115,6 +116,16 @@ class TerrainRequest(BaseModel):
     moc:         float = Field(50.0,   description="最低超障余度 (m)")
     sigma_alt:   float = Field(15.0,   description="垂直导航误差 1-sigma (m)")
     n_samples:   int   = Field(60,     description="剖面采样点数")
+
+
+class AirspaceWaypoint(BaseModel):
+    lat: float
+    lon: float
+
+class AirspaceRequest(BaseModel):
+    """空域穿越检查请求"""
+    waypoints: List[AirspaceWaypoint] = Field(..., description="航线节点 [{lat,lon}]，至少2个")
+    n_samples: int = Field(80, description="沿线采样点数")
 
 
 class HotspotRequest(BaseModel):
@@ -375,6 +386,26 @@ async def live_flights(
         return {"flights": flights, "total": len(flights)}
     except Exception as e:
         return {"flights": [], "error": str(e), "total": 0}
+
+
+@app.post("/api/v1/airspace/route-check")
+def airspace_route_check(req: AirspaceRequest):
+    """
+    航线空域穿越检查
+    - 基于 46,331 个广东适飞网格（gba_grids.json）
+    - 逐点判定：适飞区 / 受限区 / 无数据区
+    - 返回剖面、受限段列表、综合评级
+    """
+    try:
+        wps = [{"lat": w.lat, "lon": w.lon} for w in req.waypoints]
+        result = check_route_airspace({
+            "waypoints":  wps,
+            "n_samples":  req.n_samples,
+        })
+        return result
+    except Exception as e:
+        logger.exception("空域穿越检查失败")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/v1/airspace/grids")
