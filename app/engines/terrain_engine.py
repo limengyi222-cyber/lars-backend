@@ -121,18 +121,19 @@ def compute_terrain_analysis(params: Dict) -> Dict:
 
     输入参数:
       waypoints    : [{lat, lon}, ...]        至少 2 个点
-      altitude_m   : float                   计划飞行绝对高度 (m AMSL)
-                                             前端应将 AGL + 起点地形高度转换后传入
-                                             若不知起点地形，直接传 AGL 高度也可（偏保守）
+      altitude_m   : float                   计划飞行离地高度 AGL (m)
+                                             中国无人机飞行高度标准均为 AGL（离地高度）
+                                             系统在每个采样点上将 AGL 转换为 AMSL 计算
       moc          : float = 50.0            最低超障余度 (m)
       sigma_alt    : float = 15.0            垂直导航误差 1-sigma (m)
       n_samples    : int   = 60              剖面采样点数
 
     输出:
-      profile          : 采样点列表，每点含 dist_km / terrain_m / clearance_m / p_cfit
-      max_terrain_m    : 沿线最高地形 (m)
+      profile          : 采样点列表，每点含 dist_km / terrain_m / flight_m(AMSL) / clearance_m / p_cfit
+      max_terrain_m    : 沿线最高地形 AMSL (m)
       min_clearance_m  : 最小超障余度 (m)  负值 = 飞行高度低于安全线
-      msa_m            : 推荐最低安全高度 AMSL (m) = max_terrain + OBS_BUFFER + MOC
+      msa_agl_m        : 推荐最低离地安全高度 AGL (m) = OBS_BUFFER + MOC
+      msa_amsl_m       : 推荐最低安全高度 AMSL (m) = max_terrain + OBS_BUFFER + MOC
       cfit_risk        : 最大单点 CFIT 概率（保守值）
       critical_pts     : 超障余度不足的点列表（最多10条）
       verdict          : 'PASS' | 'WARNING' | 'FAIL'
@@ -140,7 +141,7 @@ def compute_terrain_analysis(params: Dict) -> Dict:
       total_dist_km    : 航线总距离 (km)
     """
     waypoints   = params['waypoints']
-    altitude_m  = float(params['altitude_m'])
+    altitude_agl = float(params['altitude_m'])   # AGL 离地高度
     moc         = float(params.get('moc', MOC_DEFAULT))
     sigma_alt   = float(params.get('sigma_alt', SIGMA_ALT_GPS))
     n_samples   = int(params.get('n_samples', 60))
@@ -159,8 +160,12 @@ def compute_terrain_analysis(params: Dict) -> Dict:
     for s, elev in zip(samples, elevations):
         elev = max(0.0, elev)
 
-        # 超障余度 = 飞行高度 - 地形高度 - 障碍物缓冲 - MOC
-        clearance = altitude_m - elev - OBS_BUFFER - moc
+        # AGL → AMSL：飞行海拔 = 地形海拔 + 离地高度
+        flight_amsl = elev + altitude_agl
+
+        # 超障余度 = 离地高度 - 障碍物缓冲 - MOC
+        # （等价于 flight_amsl - elev - OBS_BUFFER - moc）
+        clearance = altitude_agl - OBS_BUFFER - moc
 
         # CFIT 概率 = P(垂直误差 > clearance)
         if clearance <= 0:
@@ -173,7 +178,7 @@ def compute_terrain_analysis(params: Dict) -> Dict:
             'lat':        round(s['lat'], 6),
             'lon':        round(s['lon'], 6),
             'terrain_m':  round(elev, 1),
-            'flight_m':   round(altitude_m, 1),
+            'flight_m':   round(flight_amsl, 1),   # 显示 AMSL 飞行高度
             'clearance_m': round(clearance, 1),
             'p_cfit':     round(p_cfit, 8),
         }
@@ -182,7 +187,7 @@ def compute_terrain_analysis(params: Dict) -> Dict:
         if p_cfit > p_cfit_max:
             p_cfit_max = p_cfit
 
-        # 记录高风险点
+        # 记录高风险点（仅当 clearance < MOC 才是真正不足）
         if clearance < moc or p_cfit > 1e-5:
             critical_pts.append({
                 'dist_km':    pt['dist_km'],
@@ -198,8 +203,10 @@ def compute_terrain_analysis(params: Dict) -> Dict:
     max_terrain    = max(terrain_vals)   if terrain_vals   else 0.0
     min_clearance  = min(clearance_vals) if clearance_vals else 0.0
 
-    # MSA = 最高地形 + 障碍物缓冲 + MOC
-    msa = max_terrain + OBS_BUFFER + moc
+    # MSA（AGL）= 障碍物缓冲 + MOC（与地形无关，因为是 AGL）
+    msa_agl  = OBS_BUFFER + moc
+    # MSA（AMSL）= 最高地形 + 障碍物缓冲 + MOC（用于图表显示）
+    msa_amsl = max_terrain + OBS_BUFFER + moc
 
     # ── 5. 总体评级 ──────────────────────────────────
     if min_clearance >= moc and p_cfit_max < 1e-7:
@@ -213,8 +220,9 @@ def compute_terrain_analysis(params: Dict) -> Dict:
         'profile':         profile,
         'max_terrain_m':   round(max_terrain, 1),
         'min_clearance_m': round(min_clearance, 1),
-        'msa_m':           round(msa, 1),
-        'planned_alt_m':   round(altitude_m, 1),
+        'msa_m':           round(msa_agl, 1),       # AGL 最低安全高度（前端主显示）
+        'msa_amsl_m':      round(msa_amsl, 1),      # AMSL 最低安全高度（图表参考线）
+        'planned_alt_m':   round(altitude_agl, 1),  # AGL 申报高度
         'cfit_risk':       float(p_cfit_max),
         'critical_pts':    critical_pts[:10],
         'verdict':         verdict,
