@@ -1,137 +1,152 @@
 """
-数据分析引擎 — Supabase 持久化
+数据分析引擎 — Supabase 持久化（httpx 直连 REST API）
 记录：用户注册 / 评估记录 / 导出记录
 提供：管理后台统计数据
 """
 import os
 import logging
-from typing import Dict, Optional
+import httpx
+from typing import Dict
 from datetime import date, timedelta
 
 logger = logging.getLogger(__name__)
 
-_supabase = None
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
 
 
-def _client():
-    global _supabase
-    if _supabase is not None:
-        return _supabase
-    url = os.environ.get("SUPABASE_URL", "")
-    key = os.environ.get("SUPABASE_KEY", "")
-    if not url or not key:
-        return None
-    try:
-        from supabase import create_client
-        _supabase = create_client(url, key)
-    except Exception as e:
-        logger.error(f"Supabase init failed: {e}")
-        return None
-    return _supabase
+def _headers() -> dict:
+    return {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+        "Prefer": "return=minimal",
+    }
 
 
-# ── 写入函数 ────────────────────────────────────────
+def _url(table: str) -> str:
+    return f"{SUPABASE_URL}/rest/v1/{table}"
 
-def log_registration(name: str, phone: str, company: str = "", ip: str = "") -> bool:
-    c = _client()
-    if not c:
+
+def _post(table: str, data: dict) -> bool:
+    if not SUPABASE_URL or not SUPABASE_KEY:
         return False
     try:
-        c.table("registrations").insert({
-            "name": name, "phone": phone,
-            "company": company, "ip": ip
-        }).execute()
+        r = httpx.post(_url(table), headers=_headers(), json=data, timeout=8)
+        if r.status_code not in (200, 201):
+            logger.warning(f"Supabase POST {table} → {r.status_code}: {r.text[:200]}")
+            return False
         return True
     except Exception as e:
-        logger.warning(f"log_registration: {e}")
+        logger.warning(f"Supabase POST {table} error: {e}")
         return False
+
+
+def _get(table: str, select: str = "*", order: str = None,
+         limit: int = None, filters: dict = None) -> list:
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return []
+    try:
+        params: dict = {"select": select}
+        if order:
+            params["order"] = order
+        if limit:
+            params["limit"] = str(limit)
+        if filters:
+            params.update(filters)
+        r = httpx.get(_url(table), headers=_headers(), params=params, timeout=8)
+        if r.status_code == 200:
+            return r.json() or []
+        logger.warning(f"Supabase GET {table} → {r.status_code}: {r.text[:200]}")
+        return []
+    except Exception as e:
+        logger.warning(f"Supabase GET {table} error: {e}")
+        return []
+
+
+def _count(table: str, filters: dict = None) -> int:
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return 0
+    try:
+        params = {"select": "id"}
+        if filters:
+            params.update(filters)
+        headers = {**_headers(), "Prefer": "count=exact"}
+        r = httpx.get(_url(table), headers=headers, params=params, timeout=8)
+        if r.status_code in (200, 206):
+            cr = r.headers.get("content-range", "0/0")
+            return int(cr.split("/")[-1]) if "/" in cr else len(r.json() or [])
+        return 0
+    except Exception as e:
+        logger.warning(f"Supabase COUNT {table} error: {e}")
+        return 0
+
+
+# ── 写入函数 ────────────────────────────────────────────────
+
+def log_registration(name: str, phone: str, company: str = "", ip: str = "") -> bool:
+    return _post("registrations", {
+        "name": name, "phone": phone, "company": company, "ip": ip
+    })
 
 
 def log_assessment(data: Dict) -> bool:
-    c = _client()
-    if not c:
-        return False
-    try:
-        c.table("assessments").insert({
-            "phone":           data.get("phone", ""),
-            "from_city":       data.get("from_city", ""),
-            "to_city":         data.get("to_city", ""),
-            "altitude_m":      data.get("altitude_m"),
-            "route_km":        data.get("route_km"),
-            "aircraft_type":   data.get("aircraft_type", ""),
-            "cream_risk":      data.get("cream_risk"),
-            "cream_verdict":   data.get("cream_verdict", ""),
-            "terrain_verdict": data.get("terrain_verdict", ""),
-            "airspace_verdict":data.get("airspace_verdict", ""),
-            "params":          data.get("params", {}),
-        }).execute()
-        return True
-    except Exception as e:
-        logger.warning(f"log_assessment: {e}")
-        return False
+    return _post("assessments", {
+        "phone":            data.get("phone", ""),
+        "from_city":        data.get("from_city", ""),
+        "to_city":          data.get("to_city", ""),
+        "altitude_m":       data.get("altitude_m"),
+        "route_km":         data.get("route_km"),
+        "aircraft_type":    data.get("aircraft_type", ""),
+        "cream_risk":       data.get("cream_risk"),
+        "cream_verdict":    data.get("cream_verdict", ""),
+        "terrain_verdict":  data.get("terrain_verdict", ""),
+        "airspace_verdict": data.get("airspace_verdict", ""),
+        "params":           data.get("params", {}),
+    })
 
 
 def log_export(phone: str, from_city: str, to_city: str, mode: str) -> bool:
-    c = _client()
-    if not c:
-        return False
-    try:
-        c.table("exports").insert({
-            "phone": phone, "from_city": from_city,
-            "to_city": to_city, "mode": mode
-        }).execute()
-        return True
-    except Exception as e:
-        logger.warning(f"log_export: {e}")
-        return False
+    return _post("exports", {
+        "phone": phone, "from_city": from_city,
+        "to_city": to_city, "mode": mode,
+    })
 
 
-# ── 查询函数（管理后台用）──────────────────────────
+# ── 查询函数（管理后台）─────────────────────────────────────
 
 def get_admin_stats() -> Dict:
-    c = _client()
-    if not c:
+    if not SUPABASE_URL or not SUPABASE_KEY:
         return {"error": "数据库未配置（请检查 SUPABASE_URL / SUPABASE_KEY 环境变量）"}
 
     try:
         today     = date.today().isoformat()
-        yesterday = (date.today() - timedelta(days=1)).isoformat()
+        tomorrow  = (date.today() + timedelta(days=1)).isoformat()
 
-        def count(table, **filters):
-            q = c.table(table).select("id", count="exact")
-            for k, v in filters.items():
-                q = q.gte(k, v) if k == "created_at" else q.eq(k, v)
-            return q.execute().count or 0
+        total_users       = _count("registrations")
+        total_assessments = _count("assessments")
+        total_exports     = _count("exports")
+        today_regs        = _count("registrations", {"created_at": f"gte.{today}"})
+        today_assessments = _count("assessments",   {"created_at": f"gte.{today}"})
 
-        total_users       = count("registrations")
-        total_assessments = count("assessments")
-        total_exports     = count("exports")
-        today_regs        = count("registrations", created_at=today)
-        today_assessments = count("assessments",   created_at=today)
-
-        # 最近注册（20条）
-        recent_regs = (
-            c.table("registrations")
-             .select("name,phone,company,created_at")
-             .order("created_at", desc=True).limit(20).execute().data or []
+        recent_regs = _get(
+            "registrations",
+            select="name,phone,company,created_at",
+            order="created_at.desc", limit=20
         )
-
-        # 最近评估（20条）
-        recent_assessments = (
-            c.table("assessments")
-             .select("phone,from_city,to_city,altitude_m,aircraft_type,cream_risk,cream_verdict,terrain_verdict,airspace_verdict,created_at")
-             .order("created_at", desc=True).limit(20).execute().data or []
+        recent_assessments = _get(
+            "assessments",
+            select="phone,from_city,to_city,altitude_m,aircraft_type,cream_risk,cream_verdict,terrain_verdict,airspace_verdict,created_at",
+            order="created_at.desc", limit=20
         )
-
-        # 最近导出（10条）
-        recent_exports = (
-            c.table("exports")
-             .select("phone,from_city,to_city,mode,created_at")
-             .order("created_at", desc=True).limit(10).execute().data or []
+        recent_exports = _get(
+            "exports",
+            select="phone,from_city,to_city,mode,created_at",
+            order="created_at.desc", limit=10
         )
 
         # 热门路线 Top 10
-        all_a = c.table("assessments").select("from_city,to_city").execute().data or []
+        all_a = _get("assessments", select="from_city,to_city")
         rc: Dict[str, int] = {}
         for a in all_a:
             key = f"{a.get('from_city','')}-{a.get('to_city','')}"
@@ -141,31 +156,36 @@ def get_admin_stats() -> Dict:
             for k, v in sorted(rc.items(), key=lambda x: -x[1])[:10]
         ]
 
-        # 7 天趋势
+        # 7 天趋势（用 httpx 直接传多个同名参数）
         trend = []
         for i in range(6, -1, -1):
             d     = (date.today() - timedelta(days=i)).isoformat()
             d_nxt = (date.today() - timedelta(days=i - 1)).isoformat()
-            n = (
-                c.table("assessments").select("id", count="exact")
-                 .gte("created_at", d).lt("created_at", d_nxt)
-                 .execute().count or 0
-            )
+            try:
+                headers = {**_headers(), "Prefer": "count=exact"}
+                r = httpx.get(
+                    _url("assessments"), headers=headers, timeout=8,
+                    params=[("select","id"),("created_at",f"gte.{d}"),("created_at",f"lt.{d_nxt}")]
+                )
+                cr = r.headers.get("content-range","0/0")
+                n = int(cr.split("/")[-1]) if "/" in cr else 0
+            except Exception:
+                n = 0
             trend.append({"date": d, "count": n})
 
         return {
-            "total_users":        total_users,
-            "total_assessments":  total_assessments,
-            "total_exports":      total_exports,
-            "today_regs":         today_regs,
-            "today_assessments":  today_assessments,
-            "recent_registrations": recent_regs,
-            "recent_assessments":   recent_assessments,
-            "recent_exports":       recent_exports,
-            "top_routes":           top_routes,
-            "trend_7d":             trend,
+            "total_users":           total_users,
+            "total_assessments":     total_assessments,
+            "total_exports":         total_exports,
+            "today_regs":            today_regs,
+            "today_assessments":     today_assessments,
+            "recent_registrations":  recent_regs,
+            "recent_assessments":    recent_assessments,
+            "recent_exports":        recent_exports,
+            "top_routes":            top_routes,
+            "trend_7d":              trend,
         }
 
     except Exception as e:
-        logger.error(f"get_admin_stats: {e}")
+        logger.error(f"get_admin_stats error: {e}")
         return {"error": str(e)}
