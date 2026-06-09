@@ -36,6 +36,9 @@ from .engines.complexity_engine import compute_airspace_complexity
 from .engines.crossing_detector import detect_crossings
 from .engines.terrain_engine import compute_terrain_analysis
 from .engines.airspace_engine import check_route_airspace
+from .engines.analytics_engine import (
+    log_registration, log_assessment, log_export, get_admin_stats
+)
 
 app = FastAPI(
     title="LARS API",
@@ -417,6 +420,62 @@ async def airspace_grids():
         with open(grid_path, "r") as f:
             _GRIDS_CACHE = f.read()
     return JSONResponse(content=json.loads(_GRIDS_CACHE))
+
+
+# ═══════════════════════════════════════════════════
+# 数据分析 & 管理后台
+# ═══════════════════════════════════════════════════
+
+class RegistrationLog(BaseModel):
+    name:    str
+    phone:   str
+    company: str = ""
+    ip:      str = ""
+
+class AssessmentLog(BaseModel):
+    phone:           str = ""
+    from_city:       str = ""
+    to_city:         str = ""
+    altitude_m:      Optional[float] = None
+    route_km:        Optional[float] = None
+    aircraft_type:   str = ""
+    cream_risk:      Optional[float] = None
+    cream_verdict:   str = ""
+    terrain_verdict: str = ""
+    airspace_verdict:str = ""
+    params:          dict = {}
+
+class ExportLog(BaseModel):
+    phone:     str = ""
+    from_city: str = ""
+    to_city:   str = ""
+    mode:      str = ""
+
+
+@app.post("/api/v1/analytics/register")
+def analytics_register(req: RegistrationLog):
+    log_registration(req.name, req.phone, req.company, req.ip)
+    return {"ok": True}
+
+
+@app.post("/api/v1/analytics/assessment")
+def analytics_assessment(req: AssessmentLog):
+    log_assessment(req.dict())
+    return {"ok": True}
+
+
+@app.post("/api/v1/analytics/export")
+def analytics_export(req: ExportLog):
+    log_export(req.phone, req.from_city, req.to_city, req.mode)
+    return {"ok": True}
+
+
+@app.get("/api/v1/admin/stats")
+def admin_stats(token: str = Query(..., description="管理员令牌")):
+    admin_token = os.environ.get("LARS_ADMIN_TOKEN", "lars8888admin")
+    if token != admin_token:
+        raise HTTPException(status_code=403, detail="无效的管理员令牌")
+    return get_admin_stats()
 
 
 # ═══════════════════════════════════════════════════

@@ -6,3 +6,4 @@ numpy
 scipy
 scikit-learn
 networkx
+supabase>=2.0.0
