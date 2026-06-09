@@ -39,6 +39,7 @@ from .engines.airspace_engine import check_route_airspace
 from .engines.analytics_engine import (
     log_registration, log_assessment, log_export, get_admin_stats
 )
+from .engines.auth_engine import auth_register, auth_login
 
 app = FastAPI(
     title="LARS API",
@@ -468,6 +469,39 @@ def analytics_assessment(req: AssessmentLog):
 def analytics_export(req: ExportLog):
     log_export(req.phone, req.from_city, req.to_city, req.mode)
     return {"ok": True}
+
+
+# ── 账号注册 / 登录 ────────────────────────────────────────────────
+
+class AuthRegisterReq(BaseModel):
+    name:     str
+    phone:    str
+    password: str
+    company:  str = ""
+
+class AuthLoginReq(BaseModel):
+    phone:    str
+    password: str
+
+@app.post("/api/v1/auth/register")
+def api_auth_register(req: AuthRegisterReq):
+    if not req.name or not req.phone or not req.password:
+        raise HTTPException(status_code=400, detail="姓名、手机号和密码不能为空")
+    if len(req.password) < 6:
+        raise HTTPException(status_code=400, detail="密码至少 6 位")
+    result = auth_register(req.name, req.phone, req.password, req.company)
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail=result.get("error", "注册失败"))
+    return result
+
+@app.post("/api/v1/auth/login")
+def api_auth_login(req: AuthLoginReq):
+    if not req.phone or not req.password:
+        raise HTTPException(status_code=400, detail="手机号和密码不能为空")
+    result = auth_login(req.phone, req.password)
+    if not result.get("ok"):
+        raise HTTPException(status_code=401, detail=result.get("error", "登录失败"))
+    return result
 
 
 @app.get("/api/v1/admin/stats")
