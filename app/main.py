@@ -34,6 +34,7 @@ from .engines.hotspot_engine import detect_hotspots_kmeans
 from .engines.network_engine import analyze_airway_network
 from .engines.complexity_engine import compute_airspace_complexity
 from .engines.crossing_detector import detect_crossings
+from .engines.terrain_engine import compute_terrain_analysis
 
 app = FastAPI(
     title="LARS API",
@@ -100,6 +101,20 @@ class TVRRequest(BaseModel):
     nWL: float = Field(1.0, description="WL 事件次数")
     twl: float = Field(0.1, description="WL 持续时间比例")
     T: float = Field(3600.0, description="评估时间窗口 (s)")
+
+
+class TerrainWaypoint(BaseModel):
+    lat: float
+    lon: float
+
+class TerrainRequest(BaseModel):
+    """地形 CFIT 风险分析请求"""
+    waypoints:   List[TerrainWaypoint] = Field(..., description="航线节点列表 [{lat,lon}]，至少2个")
+    altitude_m:  float = Field(120.0,  description="计划飞行高度 (m AMSL 或 AGL，见 altitude_type)")
+    altitude_type: str = Field("amsl", description="高度类型: 'amsl'(海拔) | 'agl'(离地)")
+    moc:         float = Field(50.0,   description="最低超障余度 (m)")
+    sigma_alt:   float = Field(15.0,   description="垂直导航误差 1-sigma (m)")
+    n_samples:   int   = Field(60,     description="剖面采样点数")
 
 
 class HotspotRequest(BaseModel):
@@ -212,6 +227,33 @@ def compute_tvr(req: TVRRequest):
         return result
     except Exception as e:
         logger.exception("TVR 计算失败")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ═══════════════════════════════════════════════════
+# 地形 CFIT 分析
+# ═══════════════════════════════════════════════════
+
+@app.post("/api/v1/terrain/analyze")
+def analyze_terrain(req: TerrainRequest):
+    """
+    地形 CFIT 风险分析
+    - 调用 OpenTopoData SRTM 30m API 获取沿线地形高程
+    - 计算超障余度、MSA、CFIT 碰撞概率
+    - 返回地形剖面 + 风险评级 (PASS/WARNING/FAIL)
+    """
+    try:
+        wps = [{"lat": w.lat, "lon": w.lon} for w in req.waypoints]
+        result = compute_terrain_analysis({
+            "waypoints":   wps,
+            "altitude_m":  req.altitude_m,
+            "moc":         req.moc,
+            "sigma_alt":   req.sigma_alt,
+            "n_samples":   req.n_samples,
+        })
+        return result
+    except Exception as e:
+        logger.exception("地形分析失败")
         raise HTTPException(status_code=500, detail=str(e))
 
 
