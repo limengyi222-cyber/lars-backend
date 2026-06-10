@@ -40,6 +40,8 @@ from .engines.analytics_engine import (
     log_registration, log_assessment, log_export, get_admin_stats
 )
 from .engines.auth_engine import auth_register, auth_login
+from .engines.weather_engine import fetch_gba_weather
+from .engines.history_engine import save_assessment, get_history, get_stats_summary
 
 app = FastAPI(
     title="LARS API",
@@ -502,6 +504,60 @@ def api_auth_login(req: AuthLoginReq):
     if not result.get("ok"):
         raise HTTPException(status_code=401, detail=result.get("error", "登录失败"))
     return result
+
+
+# ═══════════════════════════════════════════════════
+# 气象数据
+# ═══════════════════════════════════════════════════
+
+@app.get("/api/v1/weather/gba")
+async def get_weather(bearing: float = Query(None, description="航路方位角(度)，用于计算侧风")):
+    """
+    大湾区实时气象（OpenWeatherMap）
+    返回风速/风向/能见度 + CREAM 参数建议（Vy, RNP）
+    需配置环境变量 OWM_API_KEY
+    """
+    try:
+        result = await fetch_gba_weather(route_bearing_deg=bearing)
+        return result
+    except Exception as e:
+        logger.exception("气象获取失败")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ═══════════════════════════════════════════════════
+# 评估历史
+# ═══════════════════════════════════════════════════
+
+class HistorySaveRequest(BaseModel):
+    phone:          str   = ""
+    mode:           str   = ""
+    from_city:      str   = ""
+    to_city:        str   = ""
+    risk_value:     Optional[float] = None
+    verdict:        str   = ""
+    params:         dict  = {}
+    result_summary: dict  = {}
+
+@app.post("/api/v1/history/save")
+def history_save(req: HistorySaveRequest):
+    """保存评估结果到历史记录（Supabase assessment_history 表）"""
+    result = save_assessment(req.dict())
+    return result
+
+@app.get("/api/v1/history/list")
+def history_list(
+    phone: str = Query("", description="手机号（空=返回全部最近记录）"),
+    limit: int = Query(30, description="最多返回条数")
+):
+    """查询评估历史"""
+    rows = get_history(phone=phone, limit=limit)
+    return {"history": rows, "total": len(rows)}
+
+@app.get("/api/v1/history/stats")
+def history_stats():
+    """评估历史汇总统计"""
+    return get_stats_summary()
 
 
 @app.get("/api/v1/admin/stats")
