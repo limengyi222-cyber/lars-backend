@@ -1,0 +1,40 @@
+name: LARS Backend Keep-Alive
+
+# Render 免费版在 15 分钟无活动后休眠
+# 本 workflow 每 14 分钟 ping 一次 /health，保持后端常驻
+# 完全免费：GitHub Actions 每月 2000 分钟，本任务约 3000 次/月
+
+on:
+  schedule:
+    # 每 14 分钟执行一次（cron 最小粒度 1 分钟）
+    - cron: "*/14 * * * *"
+  workflow_dispatch:   # 允许手动触发
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+
+    steps:
+      - name: Ping LARS Backend
+        run: |
+          echo "🏓 Pinging lars-backend.onrender.com ..."
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            --max-time 60 \
+            https://lars-backend.onrender.com/health)
+          echo "HTTP Status: $STATUS"
+          if [ "$STATUS" = "200" ]; then
+            echo "✅ Backend is alive"
+          else
+            echo "⚠️  Backend returned $STATUS (may be waking up)"
+          fi
+
+      - name: Warm up computation engines
+        if: success()
+        run: |
+          echo "🔥 Warming up CREAM engine..."
+          curl -s -X POST https://lars-backend.onrender.com/api/v1/cream/compute \
+            -H "Content-Type: application/json" \
+            --max-time 45 \
+            -d '{"Sx":2,"Sy":0.5,"Sz":30,"RNP":0.1,"V":30,"y_dot":1.5,"z_dot":2,"lambda_x":0.003,"lambda_y":0.003,"lambda_z":0.002,"lambda_xy":0.003,"sigma_aad":5,"sigma_ase":3,"Pz_0":0,"Ey_opp":0.3,"N_ac":10,"T_period":3600,"delta_V":0}' \
+            > /dev/null && echo "✅ CREAM warm" || echo "⚠️ CREAM slow"
