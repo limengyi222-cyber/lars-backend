@@ -12,7 +12,7 @@ LARS 后端服务 - 完整版
 实时数据: adsb.fi (替代 OpenSky，避免云端 IP 封锁)
 """
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -39,7 +39,7 @@ from .engines.airspace_engine import check_route_airspace
 from .engines.analytics_engine import (
     log_registration, log_assessment, log_export, get_admin_stats
 )
-from .engines.auth_engine import auth_register, auth_login
+from .engines.auth_engine import auth_register, auth_login, get_user_by_token
 from .engines.weather_engine import fetch_gba_weather
 from .engines.history_engine import save_assessment, get_history, get_stats_summary
 
@@ -55,6 +55,53 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ═══════════════════════════════════════════════════
+# 鉴权依赖（FastAPI Depends）
+# ═══════════════════════════════════════════════════
+
+ADMIN_TOKEN = os.environ.get("LARS_ADMIN_TOKEN", "")
+
+def get_current_user(authorization: Optional[str] = Header(None)) -> dict:
+    """
+    Bearer Token 鉴权：从 Authorization 头提取 token，查询 registrations 表
+    用于需要登录的端点（历史记录保存/查询）
+    """
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="未登录，请先注册/登录 LARS")
+    token = authorization[7:].strip()
+    user = get_user_by_token(token)
+    if not user:
+        raise HTTPException(status_code=401, detail="Session 已失效，请重新登录")
+    return user
+
+
+def get_optional_user(authorization: Optional[str] = Header(None)) -> Optional[dict]:
+    """
+    可选鉴权：有 token 则验证，无 token 则匿名（不报错）
+    用于历史记录保存：匿名用户仍可保存，但不与账号关联
+    """
+    if not authorization or not authorization.startswith("Bearer "):
+        return None
+    try:
+        return get_current_user(authorization)
+    except HTTPException:
+        return None
+
+
+def require_admin(authorization: Optional[str] = Header(None)) -> dict:
+    """管理员鉴权：验证 LARS_ADMIN_TOKEN 或管理员账号"""
+    # 方式1：直接用管理员 token（保持向后兼容）
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization[7:].strip()
+        if ADMIN_TOKEN and token == ADMIN_TOKEN:
+            return {"role": "admin", "phone": "admin"}
+        # 方式2：通过账号 role 字段
+        user = get_user_by_token(token)
+        if user and user.get("role") == "admin":
+            return user
+    raise HTTPException(status_code=403, detail="需要管理员权限")
+
 
 # ── 缓存 ──────────────────────────────────────────
 _GRIDS_CACHE = None
@@ -540,31 +587,48 @@ class HistorySaveRequest(BaseModel):
     result_summary: dict  = {}
 
 @app.post("/api/v1/history/save")
-def history_save(req: HistorySaveRequest):
-    """保存评估结果到历史记录（Supabase assessment_history 表）"""
-    result = save_assessment(req.dict())
+def history_save(
+    req: HistorySaveRequest,
+    current_user: Optional[dict] = Depends(get_optional_user)
+):
+    """
+    保存评估结果到历史记录（Supabase assessment_history 表）
+    - 已登录用户：使用账号绑定的 phone，忽略请求体中的 phone
+    - 匿名用户：使用请求体中的 phone（或空字符串）
+    """
+    data = req.dict()
+    if current_user:
+        data["phone"] = current_user.get("phone", data["phone"])
+    result = save_assessment(data)
     return result
+
 
 @app.get("/api/v1/history/list")
 def history_list(
     phone: str = Query("", description="手机号（空=返回全部最近记录）"),
-    limit: int = Query(30, description="最多返回条数")
+    limit: int = Query(30, description="最多返回条数"),
+    current_user: Optional[dict] = Depends(get_optional_user)
 ):
-    """查询评估历史"""
+    """
+    查询评估历史
+    - 已登录用户：自动过滤自己的记录，忽略 phone 参数
+    - 匿名/管理员：使用 phone 参数过滤
+    """
+    if current_user and current_user.get("role") != "admin":
+        phone = current_user.get("phone", phone)
     rows = get_history(phone=phone, limit=limit)
     return {"history": rows, "total": len(rows)}
 
+
 @app.get("/api/v1/history/stats")
-def history_stats():
-    """评估历史汇总统计"""
+def history_stats(current_user: dict = Depends(require_admin)):
+    """评估历史汇总统计（仅管理员）"""
     return get_stats_summary()
 
 
 @app.get("/api/v1/admin/stats")
-def admin_stats(token: str = Query(..., description="管理员令牌")):
-    admin_token = os.environ.get("LARS_ADMIN_TOKEN", "lars8888admin")
-    if token != admin_token:
-        raise HTTPException(status_code=403, detail="无效的管理员令牌")
+def admin_stats(current_user: dict = Depends(require_admin)):
+    """管理后台统计（Bearer token 或原 query param token 均支持）"""
     return get_admin_stats()
 
 

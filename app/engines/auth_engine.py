@@ -46,6 +46,24 @@ def _url(table: str) -> str:
     return f"{SUPABASE_URL}/rest/v1/{table}"
 
 
+def get_user_by_token(token: str) -> Optional[dict]:
+    """通过 session_token 查找用户（用于 Bearer 鉴权）"""
+    if not SUPABASE_URL or not SUPABASE_KEY or not token:
+        return None
+    try:
+        r = httpx.get(
+            _url("registrations"),
+            headers=_headers(),
+            params={"session_token": f"eq.{token}", "select": "*", "limit": "1"},
+            timeout=6,
+        )
+        data = r.json()
+        return data[0] if isinstance(data, list) and data else None
+    except Exception as e:
+        logger.warning(f"get_user_by_token error: {e}")
+        return None
+
+
 def _get_user_by_phone(phone: str) -> Optional[dict]:
     try:
         r = httpx.get(
