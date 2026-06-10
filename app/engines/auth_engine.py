@@ -8,8 +8,10 @@ import hashlib
 import secrets
 import logging
 import httpx
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional
+
+SESSION_TTL_DAYS = 30  # session token 有效期（天）
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +50,7 @@ def _url(table: str) -> str:
 
 
 def get_user_by_token(token: str) -> Optional[dict]:
-    """通过 session_token 查找用户（用于 Bearer 鉴权）"""
+    """通过 session_token 查找用户（用于 Bearer 鉴权），同时检查过期时间"""
     if not SUPABASE_URL or not SUPABASE_KEY or not token:
         return None
     try:
@@ -59,7 +61,20 @@ def get_user_by_token(token: str) -> Optional[dict]:
             timeout=6,
         )
         data = r.json()
-        return data[0] if isinstance(data, list) and data else None
+        if not isinstance(data, list) or not data:
+            return None
+        user = data[0]
+        # ── 检查 session 过期 ─────────────────────────────
+        expires_str = user.get("session_expires_at")
+        if expires_str:
+            try:
+                expires_at = datetime.fromisoformat(expires_str.replace("Z", "+00:00"))
+                if datetime.now(timezone.utc) > expires_at:
+                    logger.info(f"session expired for {user.get('phone')}")
+                    return None
+            except Exception:
+                pass  # 解析失败时放行（宽容策略）
+        return user
     except Exception as e:
         logger.warning(f"get_user_by_token error: {e}")
         return None
@@ -91,6 +106,7 @@ def auth_register(name: str, phone: str, password: str, company: str = "") -> di
 
     pw_hash = _hash_password(password)
     token = secrets.token_hex(24)
+    expires_at = (datetime.now(timezone.utc) + timedelta(days=SESSION_TTL_DAYS)).isoformat()
 
     try:
         r = httpx.post(
@@ -102,6 +118,7 @@ def auth_register(name: str, phone: str, password: str, company: str = "") -> di
                 "company": company,
                 "password_hash": pw_hash,
                 "session_token": token,
+                "session_expires_at": expires_at,
             },
             timeout=8,
         )
@@ -136,6 +153,7 @@ def auth_login(phone: str, password: str) -> dict:
         return {"ok": False, "error": "密码错误"}
 
     new_token = secrets.token_hex(24)
+    new_expires = (datetime.now(timezone.utc) + timedelta(days=SESSION_TTL_DAYS)).isoformat()
     try:
         new_count = int(user.get("login_count") or 0) + 1
         httpx.patch(
@@ -144,6 +162,7 @@ def auth_login(phone: str, password: str) -> dict:
             params={"phone": f"eq.{phone}"},
             json={
                 "session_token": new_token,
+                "session_expires_at": new_expires,
                 "last_login": datetime.now(timezone.utc).isoformat(),
                 "login_count": new_count,
             },
