@@ -8,6 +8,7 @@ import hashlib
 import secrets
 import logging
 import httpx
+from datetime import datetime, timezone
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -136,11 +137,16 @@ def auth_login(phone: str, password: str) -> dict:
 
     new_token = secrets.token_hex(24)
     try:
+        new_count = int(user.get("login_count") or 0) + 1
         httpx.patch(
             _url("registrations"),
             headers={**_headers(), "Prefer": "return=minimal"},
             params={"phone": f"eq.{phone}"},
-            json={"session_token": new_token},
+            json={
+                "session_token": new_token,
+                "last_login": datetime.now(timezone.utc).isoformat(),
+                "login_count": new_count,
+            },
             timeout=8,
         )
     except Exception as e:
@@ -153,5 +159,46 @@ def auth_login(phone: str, password: str) -> dict:
             "name": user.get("name", ""),
             "phone": phone,
             "company": user.get("company", ""),
+            "role": user.get("role", "user"),
         },
     }
+
+
+# ── 退出登录 ──────────────────────────────────────────────────────────
+def clear_session_token(phone: str) -> dict:
+    """退出登录：清除服务器端 session_token"""
+    if not SUPABASE_URL or not SUPABASE_KEY or not phone:
+        return {"ok": False, "error": "参数缺失"}
+    try:
+        httpx.patch(
+            _url("registrations"),
+            headers={**_headers(), "Prefer": "return=minimal"},
+            params={"phone": f"eq.{phone}"},
+            json={"session_token": ""},
+            timeout=6,
+        )
+        return {"ok": True}
+    except Exception as e:
+        logger.warning(f"clear_session_token error: {e}")
+        return {"ok": False, "error": str(e)}
+
+
+# ── 设置用户角色（管理员专用）────────────────────────────────────────
+def set_user_role(phone: str, role: str) -> dict:
+    """将指定手机号用户的 role 字段设为 admin 或 user"""
+    if not SUPABASE_URL or not SUPABASE_KEY or not phone:
+        return {"ok": False, "error": "参数缺失"}
+    try:
+        r = httpx.patch(
+            _url("registrations"),
+            headers={**_headers(), "Prefer": "return=minimal"},
+            params={"phone": f"eq.{phone}"},
+            json={"role": role},
+            timeout=6,
+        )
+        if r.status_code in (200, 201, 204):
+            return {"ok": True, "phone": phone, "role": role}
+        return {"ok": False, "error": f"Supabase 返回 {r.status_code}: {r.text[:100]}"}
+    except Exception as e:
+        logger.warning(f"set_user_role error: {e}")
+        return {"ok": False, "error": str(e)}

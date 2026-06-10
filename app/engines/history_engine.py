@@ -75,8 +75,8 @@ def save_assessment(data: dict) -> dict:
         return {"ok": False, "error": str(e)}
 
 
-def get_history(phone: str = "", limit: int = 30) -> list:
-    """查询评估历史（按手机号过滤，或返回全部最近记录）"""
+def get_history(phone: str = "", limit: int = 30, offset: int = 0) -> list:
+    """查询评估历史（按手机号过滤，或返回全部最近记录；支持分页 offset）"""
     if not SUPABASE_URL or not SUPABASE_KEY:
         return []
 
@@ -84,6 +84,7 @@ def get_history(phone: str = "", limit: int = 30) -> list:
         "select": "*",
         "order":  "created_at.desc",
         "limit":  str(limit),
+        "offset": str(offset),
     }
     if phone:
         params["user_phone"] = f"eq.{phone}"

@@ -12,7 +12,7 @@ LARS 后端服务 - 完整版
 实时数据: adsb.fi (替代 OpenSky，避免云端 IP 封锁)
 """
 
-from fastapi import FastAPI, HTTPException, Query, Depends, Header
+from fastapi import FastAPI, HTTPException, Query, Depends, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -21,6 +21,9 @@ import httpx
 import os
 import json
 import logging
+import time
+import threading
+from collections import defaultdict
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -39,7 +42,7 @@ from .engines.airspace_engine import check_route_airspace
 from .engines.analytics_engine import (
     log_registration, log_assessment, log_export, get_admin_stats
 )
-from .engines.auth_engine import auth_register, auth_login, get_user_by_token
+from .engines.auth_engine import auth_register, auth_login, get_user_by_token, clear_session_token, set_user_role
 from .engines.weather_engine import fetch_gba_weather
 from .engines.history_engine import save_assessment, get_history, get_stats_summary
 
@@ -51,10 +54,38 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "https://lars-risk-assessment.pages.dev",
+        "http://localhost:5500",
+        "http://127.0.0.1:5500",
+        "http://localhost:3000",
+        "http://localhost:8080",
+    ],
+    allow_origin_regex=r"https://[a-z0-9]+\.lars-risk-assessment\.pages\.dev",
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ── 简单内存速率限制器（进程内，重启清零）─────────────────────────────
+_RL_BUCKETS: dict = defaultdict(list)
+_RL_LOCK = threading.Lock()
+
+def _rate_check(request: Request, limit: int = 30, window: int = 60) -> None:
+    """
+    检查单 IP 速率，超限抛 429。
+    limit: window 秒内最多允许的请求数
+    """
+    ip = (request.client.host if request.client else "unknown")
+    now = time.monotonic()
+    cutoff = now - window
+    with _RL_LOCK:
+        _RL_BUCKETS[ip] = [t for t in _RL_BUCKETS[ip] if t > cutoff]
+        if len(_RL_BUCKETS[ip]) >= limit:
+            raise HTTPException(
+                status_code=429,
+                detail=f"请求过于频繁，{window} 秒内最多 {limit} 次计算请求，请稍后再试"
+            )
+        _RL_BUCKETS[ip].append(now)
 
 # ═══════════════════════════════════════════════════
 # 鉴权依赖（FastAPI Depends）
@@ -248,12 +279,13 @@ def health():
 # ═══════════════════════════════════════════════════
 
 @app.post("/api/v1/cream/compute")
-def compute_cream(req: CREAMRequest):
+def compute_cream(req: CREAMRequest, request: Request):
     """
     CREAM 三维碰撞风险计算
     基于 ICAO Doc 9689 + NTU ATMRI CREAM 方法论
     使用 SciPy 高精度数值积分（比前端 JS 近似更准确）
     """
+    _rate_check(request, limit=30, window=60)
     try:
         result = compute_3d_risk(req.dict())
         return result
@@ -263,11 +295,12 @@ def compute_cream(req: CREAMRequest):
 
 
 @app.post("/api/v1/cream/uav-collision")
-def compute_uav(req: UAVCollisionRequest):
+def compute_uav(req: UAVCollisionRequest, request: Request):
     """
     无人机入侵碰撞概率（布朗运动模型）
     计算 UAV 与受保护空域的碰撞概率
     """
+    _rate_check(request, limit=30, window=60)
     try:
         result = compute_uav_collision(req.dict())
         return result
@@ -281,11 +314,12 @@ def compute_uav(req: UAVCollisionRequest):
 # ═══════════════════════════════════════════════════
 
 @app.post("/api/v1/tvr/compute")
-def compute_tvr(req: TVRRequest):
+def compute_tvr(req: TVRRequest, request: Request):
     """
     总垂直风险 Naz_total
     叠加技术误差、CLD（高度偏差）、WL（错误高度层）三种情形
     """
+    _rate_check(request, limit=30, window=60)
     try:
         result = compute_total_vertical_risk(req.dict())
         return result
@@ -299,13 +333,14 @@ def compute_tvr(req: TVRRequest):
 # ═══════════════════════════════════════════════════
 
 @app.post("/api/v1/terrain/analyze")
-def analyze_terrain(req: TerrainRequest):
+def analyze_terrain(req: TerrainRequest, request: Request):
     """
     地形 CFIT 风险分析
     - 调用 OpenTopoData SRTM 30m API 获取沿线地形高程
     - 计算超障余度、MSA、CFIT 碰撞概率
     - 返回地形剖面 + 风险评级 (PASS/WARNING/FAIL)
     """
+    _rate_check(request, limit=15, window=60)
     try:
         wps = [{"lat": w.lat, "lon": w.lon} for w in req.waypoints]
         result = compute_terrain_analysis({
@@ -326,13 +361,14 @@ def analyze_terrain(req: TerrainRequest):
 # ═══════════════════════════════════════════════════
 
 @app.post("/api/v1/hotspots/detect")
-async def detect_hotspots(req: HotspotRequest):
+async def detect_hotspots(req: HotspotRequest, request: Request):
     """
     K-means++ 热点聚类检测
     1. 从 adsb.fi 拉取实时航班
     2. 检测航迹交叉点
     3. K-means++ 聚类 → 识别高风险热点
     """
+    _rate_check(request, limit=10, window=60)
     try:
         bbox = req.bbox
         if req.use_live_data:
@@ -366,6 +402,7 @@ async def detect_hotspots(req: HotspotRequest):
 
 @app.post("/api/v1/network/analyze")
 async def analyze_network(
+    request: Request,
     percolation_threshold: float = Query(0.3, description="渗流阈值"),
     bbox: str = Query("112.5,22.0,115.0,23.5", description="minLon,minLat,maxLon,maxLat")
 ):
@@ -376,6 +413,7 @@ async def analyze_network(
     - 网络渗流分析
     - 关键航段识别
     """
+    _rate_check(request, limit=10, window=60)
     try:
         b = [float(x) for x in bbox.split(",")]
         flights = await _fetch_adsb_flights(b[0], b[1], b[2], b[3])
@@ -397,6 +435,7 @@ async def analyze_network(
 
 @app.post("/api/v1/complexity/compute")
 async def compute_complexity_endpoint(
+    request: Request,
     rh_nm: float = Query(5.0, description="水平保护半径 (NM)"),
     rv_ft: float = Query(1000.0, description="垂直保护半径 (ft)"),
     look_ahead_sec: int = Query(600, description="预测时长 (s)"),
@@ -407,6 +446,7 @@ async def compute_complexity_endpoint(
     空域复杂度（Interacting Particle System）
     基于 Prandini 等人方法，计算各空域点的碰撞概率积分
     """
+    _rate_check(request, limit=10, window=60)
     try:
         b = [float(x) for x in bbox.split(",")]
         flights = await _fetch_adsb_flights(b[0], b[1], b[2], b[3])
@@ -553,6 +593,34 @@ def api_auth_login(req: AuthLoginReq):
     return result
 
 
+@app.post("/api/v1/auth/logout")
+def api_auth_logout(current_user: dict = Depends(get_current_user)):
+    """退出登录 — 清除服务器端 session_token"""
+    phone = current_user.get("phone", "")
+    result = clear_session_token(phone)
+    return {"ok": True, "message": "已退出登录"}
+
+
+# ── 管理员：设置用户角色 ────────────────────────────────────────────
+
+class SetRoleRequest(BaseModel):
+    role: str  # 'admin' 或 'user'
+
+@app.patch("/api/v1/admin/user/{phone}/role")
+def admin_set_role(
+    phone: str,
+    req: SetRoleRequest,
+    current_user: dict = Depends(require_admin)
+):
+    """管理员设置用户角色（admin/user）"""
+    if req.role not in ("admin", "user"):
+        raise HTTPException(status_code=400, detail="角色只能是 'admin' 或 'user'")
+    result = set_user_role(phone, req.role)
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail=result.get("error", "操作失败"))
+    return result
+
+
 # ═══════════════════════════════════════════════════
 # 气象数据
 # ═══════════════════════════════════════════════════
@@ -606,18 +674,20 @@ def history_save(
 @app.get("/api/v1/history/list")
 def history_list(
     phone: str = Query("", description="手机号（空=返回全部最近记录）"),
-    limit: int = Query(30, description="最多返回条数"),
+    limit: int = Query(20, description="最多返回条数"),
+    offset: int = Query(0, description="分页偏移量"),
     current_user: Optional[dict] = Depends(get_optional_user)
 ):
     """
     查询评估历史
     - 已登录用户：自动过滤自己的记录，忽略 phone 参数
     - 匿名/管理员：使用 phone 参数过滤
+    - 支持 offset 分页
     """
     if current_user and current_user.get("role") != "admin":
         phone = current_user.get("phone", phone)
-    rows = get_history(phone=phone, limit=limit)
-    return {"history": rows, "total": len(rows)}
+    rows = get_history(phone=phone, limit=limit, offset=offset)
+    return {"history": rows, "total": len(rows), "offset": offset, "limit": limit}
 
 
 @app.get("/api/v1/history/stats")

@@ -13,11 +13,20 @@ CFIT = Controlled Flight Into Terrain（可控飞行撞地）
 """
 import numpy as np
 import httpx
+import hashlib
 from scipy.stats import norm
 from typing import List, Dict, Optional
 
 # ── 外部 DEM API ──────────────────────────────────────
 TOPO_API_URL = "https://api.opentopodata.org/v1/srtm30m"
+
+# ── 高程查询缓存（内存，进程内有效；坐标精度 4 位小数 ≈ 11m）────────
+_ELEV_CACHE: Dict[str, List[float]] = {}
+_ELEV_CACHE_MAX = 200  # 最多缓存 200 个查询批次
+
+def _cache_key(points: List[Dict]) -> str:
+    sig = ";".join(f"{p['lat']:.4f},{p['lon']:.4f}" for p in points)
+    return hashlib.md5(sig.encode()).hexdigest()
 
 # ── UAV 低空安全参数 ─────────────────────────────────
 MOC_DEFAULT      = 50.0   # 最低超障余度 (m) — ICAO UAV 建议值
@@ -81,10 +90,15 @@ def _interpolate_route(waypoints: List[Dict], n_samples: int = 60) -> List[Dict]
 
 def _fetch_elevations(points: List[Dict]) -> tuple[List[float], bool]:
     """
-    批量查询 OpenTopoData SRTM 30m 高程
+    批量查询 OpenTopoData SRTM 30m 高程（带内存缓存）
     返回: (elevations_list, api_success)
     失败时返回全 0（海平面），api_success = False
     """
+    # ── 缓存命中 ──────────────────────────────────────
+    key = _cache_key(points)
+    if key in _ELEV_CACHE:
+        return _ELEV_CACHE[key], True
+
     elevations: List[float] = []
     api_ok = True
 
@@ -109,6 +123,15 @@ def _fetch_elevations(points: List[Dict]) -> tuple[List[float], bool]:
         except Exception:
             elevations.extend([0.0] * len(batch))
             api_ok = False
+
+    # ── 写入缓存（LRU 简化版：超限时清空最旧一半）────────────────
+    if api_ok and len(elevations) == len(points):
+        if len(_ELEV_CACHE) >= _ELEV_CACHE_MAX:
+            # 删掉前半部分（近似 LRU）
+            keys_to_drop = list(_ELEV_CACHE.keys())[:_ELEV_CACHE_MAX // 2]
+            for k in keys_to_drop:
+                del _ELEV_CACHE[k]
+        _ELEV_CACHE[key] = elevations
 
     return elevations, api_ok
 
