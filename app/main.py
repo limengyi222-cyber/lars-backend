@@ -44,6 +44,7 @@ from .engines.analytics_engine import (
 )
 from .engines.auth_engine import auth_register, auth_login, get_user_by_token, clear_session_token, set_user_role
 from .engines.weather_engine import fetch_gba_weather
+from .engines.sim_traffic_engine import generate_sim_traffic
 from .engines.history_engine import save_assessment, get_history, get_stats_summary
 
 app = FastAPI(
@@ -217,6 +218,8 @@ class HotspotRequest(BaseModel):
     k_clusters: int = Field(9, description="聚类数量")
     bbox: List[float] = Field([112.5, 22.0, 115.0, 23.5], description="[minLon,minLat,maxLon,maxLat]")
     use_live_data: bool = Field(True, description="使用实时 ADS-B 数据")
+    data_source: str = Field("live", description="数据源: 'live'(实时ADS-B有人机) | 'simulated'(仿真低空流量)")
+    sim_density: float = Field(1.0, description="仿真流量密度系数（仅 simulated 时生效）")
 
 
 # ═══════════════════════════════════════════════════
@@ -371,11 +374,17 @@ async def detect_hotspots(req: HotspotRequest, request: Request):
     _rate_check(request, limit=10, window=60)
     try:
         bbox = req.bbox
-        if req.use_live_data:
+        if req.data_source == "simulated":
+            flights = generate_sim_traffic(density=req.sim_density)
+            src_label = "simulated"
+            logger.info(f"生成 {len(flights)} 架次仿真低空流量")
+        elif req.use_live_data:
             flights = await _fetch_adsb_flights(bbox[0], bbox[1], bbox[2], bbox[3])
+            src_label = "adsb.fi (live)"
             logger.info(f"获取到 {len(flights)} 架次实时航班")
         else:
             flights = _demo_flights()
+            src_label = "demo"
 
         crossings = detect_crossings(flights)
         logger.info(f"检测到 {len(crossings)} 个交叉点")
@@ -389,7 +398,7 @@ async def detect_hotspots(req: HotspotRequest, request: Request):
             "hotspots": hotspots,
             "total_crossings": len(crossings),
             "flights_analyzed": len(flights),
-            "data_source": "adsb.fi (live)" if req.use_live_data else "demo",
+            "data_source": src_label,
         }
     except Exception as e:
         logger.exception("热点检测失败")
@@ -404,26 +413,32 @@ async def detect_hotspots(req: HotspotRequest, request: Request):
 async def analyze_network(
     request: Request,
     percolation_threshold: float = Query(0.3, description="渗流阈值"),
-    bbox: str = Query("112.5,22.0,115.0,23.5", description="minLon,minLat,maxLon,maxLat")
+    bbox: str = Query("112.5,22.0,115.0,23.5", description="minLon,minLat,maxLon,maxLat"),
+    data_source: str = Query("live", description="数据源: 'live' | 'simulated'"),
+    sim_density: float = Query(1.0, description="仿真流量密度系数")
 ):
     """
     航路网络分析（NetworkX）
-    - 边介数中心性
-    - 节点介数中心性
-    - 网络渗流分析
-    - 关键航段识别
+    - 边介数中心性 / 节点介数中心性 / 网络渗流 / 关键航段识别
+    - data_source=simulated 时使用大湾区低空走廊仿真流量（带轨迹，可建图）
     """
     _rate_check(request, limit=10, window=60)
     try:
-        b = [float(x) for x in bbox.split(",")]
-        flights = await _fetch_adsb_flights(b[0], b[1], b[2], b[3])
-        if not flights:
-            flights = _demo_flights()
+        if data_source == "simulated":
+            flights = generate_sim_traffic(density=sim_density)
+            src_label = "simulated"
+        else:
+            b = [float(x) for x in bbox.split(",")]
+            flights = await _fetch_adsb_flights(b[0], b[1], b[2], b[3])
+            src_label = "adsb.fi"
+            if not flights:
+                flights = _demo_flights()
+                src_label = "demo"
         result = analyze_airway_network(
             flights=flights,
             percolation_threshold=percolation_threshold
         )
-        return {**result, "flights_analyzed": len(flights), "data_source": "adsb.fi"}
+        return {**result, "flights_analyzed": len(flights), "data_source": src_label}
     except Exception as e:
         logger.exception("网络分析失败")
         raise HTTPException(status_code=500, detail=str(e))
@@ -440,25 +455,34 @@ async def compute_complexity_endpoint(
     rv_ft: float = Query(1000.0, description="垂直保护半径 (ft)"),
     look_ahead_sec: int = Query(600, description="预测时长 (s)"),
     grid_size: int = Query(10, description="网格大小"),
-    bbox: str = Query("112.5,22.0,115.0,23.5")
+    bbox: str = Query("112.5,22.0,115.0,23.5"),
+    data_source: str = Query("live", description="数据源: 'live' | 'simulated'"),
+    sim_density: float = Query(1.0, description="仿真流量密度系数")
 ):
     """
     空域复杂度（Interacting Particle System）
     基于 Prandini 等人方法，计算各空域点的碰撞概率积分
+    data_source=simulated 时使用大湾区低空走廊仿真流量
     """
     _rate_check(request, limit=10, window=60)
     try:
-        b = [float(x) for x in bbox.split(",")]
-        flights = await _fetch_adsb_flights(b[0], b[1], b[2], b[3])
-        if not flights:
-            flights = _demo_flights()
+        if data_source == "simulated":
+            flights = generate_sim_traffic(density=sim_density)
+            src_label = "simulated"
+        else:
+            b = [float(x) for x in bbox.split(",")]
+            flights = await _fetch_adsb_flights(b[0], b[1], b[2], b[3])
+            src_label = "adsb.fi"
+            if not flights:
+                flights = _demo_flights()
+                src_label = "demo"
         result = compute_airspace_complexity(
             flights=flights,
             rh_nm=rh_nm, rv_ft=rv_ft,
             look_ahead_sec=look_ahead_sec,
             grid_size=grid_size
         )
-        return {**result, "live_aircraft": len(flights), "data_source": "adsb.fi"}
+        return {**result, "live_aircraft": len(flights), "data_source": src_label}
     except Exception as e:
         logger.exception("复杂度计算失败")
         raise HTTPException(status_code=500, detail=str(e))

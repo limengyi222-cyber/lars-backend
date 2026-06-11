@@ -6,28 +6,18 @@ def detect_crossings(flights: List[Dict]) -> List[Dict]:
     """检测航班之间的交叉点"""
     crossings = []
     
-    # 对每个有轨迹的航班，提取航段
+    # 用每架航班的当前位置作为检测点
+    # （注：下方交叉判定基于点邻近实现，线段相交未实现；
+    #   带轨迹的航班同样取当前位置，否则会被静默跳过）
     segments = []
     for f in flights:
-        track = f.get('track', [])
-        if len(track) < 2:
-            # 没有历史轨迹，用当前位置作为点
-            if f.get('latitude') and f.get('longitude'):
-                segments.append({
-                    'icao24': f.get('icao24'),
-                    'lon': f['longitude'],
-                    'lat': f['latitude'],
-                    'alt': f.get('altitude_m', 0) or 0,
-                })
-            continue
-        for i in range(len(track) - 1):
-            if track[i] and track[i+1] and len(track[i]) >= 3:
-                segments.append({
-                    'icao24': f.get('icao24'),
-                    'lon1': track[i][2], 'lat1': track[i][1],
-                    'lon2': track[i+1][2], 'lat2': track[i+1][1],
-                    'alt': track[i][3] if len(track[i]) > 3 else 0,
-                })
+        if f.get('latitude') and f.get('longitude'):
+            segments.append({
+                'icao24': f.get('icao24'),
+                'lon': f['longitude'],
+                'lat': f['latitude'],
+                'alt': f.get('altitude_m', 0) or 0,
+            })
     
     # 简化：如果是实时数据（只有点），用空间邻近性近似交叉点
     for i, s1 in enumerate(segments):
