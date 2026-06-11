@@ -93,7 +93,8 @@ def _compute_Pz_Sz(Sz: float, lambda_z: float,
         -half_width, half_width,
         limit=200, epsabs=1e-14, epsrel=1e-10
     )
-    return 2.0 * lambda_z * integral
+    # 概率上限 1.0：当 2λz 超过误差分布宽度时线性化近似失效，需截断
+    return min(1.0, 2.0 * lambda_z * integral)
 
 
 def _compute_Py_Sy(Sy: float, RNP: float, lambda_y: float) -> float:
@@ -193,8 +194,11 @@ def compute_3d_risk(params: Dict) -> Dict:
     V = max(V, 1e-6)
 
     # ═══ 垂直重叠概率 ════════════════════════════════════
-    Pz_Sz   = _compute_Pz_Sz(Sz,  lambda_z, sigma_aad, sigma_ase)
-    Pz_0    = _compute_Pz_Sz(0.0, lambda_z, sigma_aad, sigma_ase)  # Pz(0) 从模型计算
+    # 单位修正：TVE 积分在英尺域（σ_aad/σ_ase 为 ft），λz 必须从 NM 换算为 ft，
+    # 否则 Pz 被低估约 6076 倍（曾导致高密度场景误判 PASS）
+    lambda_z_ft = lambda_z * 6076.115
+    Pz_Sz   = _compute_Pz_Sz(Sz,  lambda_z_ft, sigma_aad, sigma_ase)
+    Pz_0    = _compute_Pz_Sz(0.0, lambda_z_ft, sigma_aad, sigma_ase)  # Pz(0) 从模型计算
 
     # ═══ 垂直风险 Naz ════════════════════════════════════
     # Py(0) 解析解：λy / (2b)，b = -RNP/ln(0.05)
@@ -210,7 +214,9 @@ def compute_3d_risk(params: Dict) -> Dict:
     # 等效通过频率 — 从流量密度推导
     # n_z_equiv ≈ N_ac · 2λz / (V · T_period)  [ICAO Doc 9689 eq. A-6]
     # 原固定值 0.357 来自传统民航，对低空 UAV 走廊不适用
-    n_z_equiv = (N_ac * 2.0 * lambda_z) / (V * T_period)
+    # 单位修正：V 为 knots(NM/h)，T_period 为秒 → 换算为小时，否则低估 3600 倍
+    T_hours = max(T_period / 3600.0, 1e-6)
+    n_z_equiv = (N_ac * 2.0 * lambda_z) / (V * T_hours)
     n_z_equiv = max(n_z_equiv, 1e-8)
 
     Naz = 2.0 * Pz_Sz * Py_0 * n_z_equiv * kinematic
