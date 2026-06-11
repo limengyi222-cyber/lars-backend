@@ -57,12 +57,9 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://lars-risk-assessment.pages.dev",
-        "http://localhost:5500",
-        "http://127.0.0.1:5500",
-        "http://localhost:3000",
-        "http://localhost:8080",
     ],
-    allow_origin_regex=r"https://[a-z0-9]+\.lars-risk-assessment\.pages\.dev",
+    # 生产锁定 pages.dev（含预览子域）；本地开发允许任意 localhost 端口
+    allow_origin_regex=r"https://[a-z0-9-]+\.lars-risk-assessment\.pages\.dev|http://localhost:\d+|http://127\.0\.0\.1:\d+",
     allow_methods=["*"],
     allow_headers=["*"],
 )
