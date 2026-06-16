@@ -176,76 +176,96 @@ def compute_terrain_analysis(params: Dict) -> Dict:
     elevations, api_ok = _fetch_elevations(samples)
 
     # ── 3. 逐点计算 ──────────────────────────────────
+    # AGL（离地）飞行下，无人机随地形起伏保持恒定离地高度，因此真正与地形相关的
+    # CFIT 风险来自两个维度（均随航线变化，而非恒定值）：
+    #   ① 地形坡度：地形上升速度超过无人机安全跟随能力 → 撞坡风险
+    #   ② 地形起伏：相对飞行高度的剧烈起伏增加跟随难度
+    # 障碍物余度 = 离地高度 - MOC（高于 MOC 安全底线的裕度，诚实的常量）
+    obstacle_margin = altitude_agl - moc
+
     profile = []
     p_cfit_max = 0.0
     critical_pts = []
+    max_slope_deg = 0.0
+    prev = None
 
     for s, elev in zip(samples, elevations):
         elev = max(0.0, elev)
-
-        # AGL → AMSL：飞行海拔 = 地形海拔 + 离地高度
         flight_amsl = elev + altitude_agl
 
-        # 超障余度 = 离地高度 - 障碍物缓冲 - MOC
-        # （等价于 flight_amsl - elev - OBS_BUFFER - moc）
-        clearance = altitude_agl - OBS_BUFFER - moc
+        # 与前一采样点之间的地形坡度
+        slope_deg = 0.0
+        if prev is not None:
+            d_horiz_m = _haversine_km(prev['lat'], prev['lon'], s['lat'], s['lon']) * 1000.0
+            d_elev = elev - prev['elev']
+            if d_horiz_m > 1.0:
+                slope_deg = float(np.degrees(np.arctan2(abs(d_elev), d_horiz_m)))
+        if slope_deg > max_slope_deg:
+            max_slope_deg = slope_deg
 
-        # CFIT 概率 = P(垂直误差 > clearance)
-        if clearance <= 0:
+        # CFIT 概率：障碍余度不足或坡度陡峭时升高
+        if obstacle_margin <= 0:
             p_cfit = 1.0
         else:
-            p_cfit = float(1.0 - norm.cdf(clearance / sigma_alt))
+            # 坡度等效削减跟随余度：陡坡使有效余度下降
+            eff_margin = obstacle_margin * max(0.05, 1.0 - slope_deg / 45.0)
+            p_cfit = float(1.0 - norm.cdf(eff_margin / sigma_alt))
 
         pt = {
             'dist_km':    round(s['dist_km'], 3),
             'lat':        round(s['lat'], 6),
             'lon':        round(s['lon'], 6),
             'terrain_m':  round(elev, 1),
-            'flight_m':   round(flight_amsl, 1),   # 显示 AMSL 飞行高度
-            'clearance_m': round(clearance, 1),
+            'flight_m':   round(flight_amsl, 1),
+            'clearance_m': round(obstacle_margin, 1),  # 障碍余度（高于 MOC 的裕度）
+            'slope_deg':  round(slope_deg, 1),
             'p_cfit':     round(p_cfit, 8),
         }
         profile.append(pt)
-
         if p_cfit > p_cfit_max:
             p_cfit_max = p_cfit
 
-        # 记录高风险点（仅当 clearance < MOC 才是真正不足）
-        if clearance < moc or p_cfit > 1e-5:
+        # 高风险点：陡坡段（>20°）
+        if slope_deg > 20.0:
             critical_pts.append({
-                'dist_km':    pt['dist_km'],
-                'terrain_m':  pt['terrain_m'],
-                'clearance_m': pt['clearance_m'],
-                'p_cfit':     pt['p_cfit'],
+                'dist_km':   pt['dist_km'],
+                'terrain_m': pt['terrain_m'],
+                'slope_deg': pt['slope_deg'],
+                'p_cfit':    pt['p_cfit'],
             })
 
+        prev = {'lat': s['lat'], 'lon': s['lon'], 'elev': elev}
+
     # ── 4. 统计 ──────────────────────────────────────
-    terrain_vals   = [p['terrain_m']   for p in profile]
-    clearance_vals = [p['clearance_m'] for p in profile]
+    terrain_vals = [p['terrain_m'] for p in profile]
+    max_terrain  = max(terrain_vals) if terrain_vals else 0.0
+    min_terrain  = min(terrain_vals) if terrain_vals else 0.0
+    relief       = max_terrain - min_terrain   # 地形起伏（最高-最低）
 
-    max_terrain    = max(terrain_vals)   if terrain_vals   else 0.0
-    min_clearance  = min(clearance_vals) if clearance_vals else 0.0
+    # MSA：建议最低离地高度 = MOC + 障碍缓冲（仅作建议参考）
+    msa_agl  = moc + OBS_BUFFER
+    msa_amsl = max_terrain + altitude_agl
 
-    # MSA（AGL）= 障碍物缓冲 + MOC（与地形无关，因为是 AGL）
-    msa_agl  = OBS_BUFFER + moc
-    # MSA（AMSL）= 最高地形 + 障碍物缓冲 + MOC（用于图表显示）
-    msa_amsl = max_terrain + OBS_BUFFER + moc
-
-    # ── 5. 总体评级 ──────────────────────────────────
-    if min_clearance >= moc and p_cfit_max < 1e-7:
-        verdict = 'PASS'
-    elif min_clearance >= 0 and p_cfit_max < 1e-3:
+    # ── 5. 总体评级（基于真实地形坡度与起伏）──────────────
+    if obstacle_margin <= 0 or max_slope_deg > 35.0:
+        # 飞行高度低于 MOC 底线，或地形过陡无法安全跟随
+        verdict = 'FAIL'
+    elif max_slope_deg > 20.0 or relief > 2.0 * altitude_agl:
+        # 存在陡坡段，或地形起伏远大于飞行高度
         verdict = 'WARNING'
     else:
-        verdict = 'FAIL'
+        verdict = 'PASS'
 
     return {
         'profile':         profile,
         'max_terrain_m':   round(max_terrain, 1),
-        'min_clearance_m': round(min_clearance, 1),
-        'msa_m':           round(msa_agl, 1),       # AGL 最低安全高度（前端主显示）
-        'msa_amsl_m':      round(msa_amsl, 1),      # AMSL 最低安全高度（图表参考线）
-        'planned_alt_m':   round(altitude_agl, 1),  # AGL 申报高度
+        'min_terrain_m':   round(min_terrain, 1),
+        'relief_m':        round(relief, 1),            # 地形起伏
+        'max_slope_deg':   round(max_slope_deg, 1),     # 最大地形坡度
+        'min_clearance_m': round(obstacle_margin, 1),   # 障碍余度（高于 MOC）
+        'msa_m':           round(msa_agl, 1),
+        'msa_amsl_m':      round(msa_amsl, 1),
+        'planned_alt_m':   round(altitude_agl, 1),
         'cfit_risk':       float(p_cfit_max),
         'critical_pts':    critical_pts[:10],
         'verdict':         verdict,
