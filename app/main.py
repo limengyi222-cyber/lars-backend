@@ -14,6 +14,7 @@ LARS 后端服务 - 完整版
 
 from fastapi import FastAPI, HTTPException, Query, Depends, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from typing import List, Optional
@@ -52,6 +53,9 @@ app = FastAPI(
     description="低空航路航线安全风险评估系统 — CREAM / TVR / 热点 / 网络 / 复杂度",
     version="2.0.0"
 )
+
+# gzip 压缩（适飞网格等大 JSON：5MB → ~1MB）
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 app.add_middleware(
     CORSMiddleware,
