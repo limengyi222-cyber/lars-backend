@@ -17,8 +17,13 @@ import hashlib
 from scipy.stats import norm
 from typing import List, Dict, Optional
 
-# ── 外部 DEM API ──────────────────────────────────────
-TOPO_API_URL = "https://api.opentopodata.org/v1/srtm30m"
+# ── 外部 DEM API（多源容错链）──────────────────────────────────────
+# mapzen(Terrarium，融合 Copernicus/SRTM/ASTER 等全球源) 优先，srtm30m 兜底
+DEM_SOURCES = [
+    ("mapzen",   "https://api.opentopodata.org/v1/mapzen"),
+    ("srtm30m",  "https://api.opentopodata.org/v1/srtm30m"),
+]
+TOPO_API_URL = DEM_SOURCES[0][1]  # 兼容旧引用
 
 # ── 高程查询缓存（内存，进程内有效；坐标精度 4 位小数 ≈ 11m）────────
 _ELEV_CACHE: Dict[str, List[float]] = {}
@@ -88,11 +93,23 @@ def _interpolate_route(waypoints: List[Dict], n_samples: int = 60) -> List[Dict]
     return samples
 
 
+def _fetch_batch(url: str, batch: List[Dict]):
+    """向单个 DEM 源请求一批点；成功返回 elevations(list，可含 None)，失败返回 None"""
+    locs = "|".join(f"{p['lat']:.6f},{p['lon']:.6f}" for p in batch)
+    try:
+        resp = httpx.get(url, params={"locations": locs}, timeout=20.0, follow_redirects=True)
+        if resp.status_code == 200:
+            return [r.get("elevation") for r in resp.json().get("results", [])]
+    except Exception:
+        pass
+    return None
+
+
 def _fetch_elevations(points: List[Dict]) -> tuple[List[float], bool]:
     """
-    批量查询 OpenTopoData SRTM 30m 高程（带内存缓存）
+    批量查询地形高程（多源容错：mapzen 优先，srtm30m 兜底，空值再回退）
     返回: (elevations_list, api_success)
-    失败时返回全 0（海平面），api_success = False
+    全部失败时返回全 0（海平面），api_success = False
     """
     # ── 缓存命中 ──────────────────────────────────────
     key = _cache_key(points)
@@ -104,25 +121,23 @@ def _fetch_elevations(points: List[Dict]) -> tuple[List[float], bool]:
 
     for i in range(0, len(points), 100):
         batch = points[i:i + 100]
-        locs = "|".join(f"{p['lat']:.6f},{p['lon']:.6f}" for p in batch)
-
-        try:
-            resp = httpx.get(
-                TOPO_API_URL,
-                params={"locations": locs},
-                timeout=20.0,
-                follow_redirects=True
-            )
-            if resp.status_code == 200:
-                results = resp.json().get("results", [])
-                for r in results:
-                    elevations.append(float(r.get("elevation") or 0.0))
+        got = None
+        for _name, url in DEM_SOURCES:
+            res = _fetch_batch(url, batch)
+            if res is None:
+                continue
+            if got is None:
+                got = res
             else:
-                elevations.extend([0.0] * len(batch))
-                api_ok = False
-        except Exception:
+                # 用后续源填补前一源的空值（void）
+                got = [g if g is not None else r for g, r in zip(got, res)]
+            if all(v is not None for v in got):
+                break  # 该批已无空值，无需再试其他源
+        if got is None:
             elevations.extend([0.0] * len(batch))
             api_ok = False
+        else:
+            elevations.extend([float(v) if v is not None else 0.0 for v in got])
 
     # ── 写入缓存（LRU 简化版：超限时清空最旧一半）────────────────
     if api_ok and len(elevations) == len(points):
