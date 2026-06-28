@@ -651,14 +651,18 @@ def admin_set_role(
 # ═══════════════════════════════════════════════════
 
 @app.get("/api/v1/weather/gba")
-async def get_weather(bearing: float = Query(None, description="航路方位角(度)，用于计算侧风")):
+async def get_weather(
+    bearing: float = Query(None, description="航路方位角(度)，用于计算侧风"),
+    lat: float = Query(None, description="查询纬度（航线中点）；缺省用广州"),
+    lon: float = Query(None, description="查询经度（航线中点）；缺省用广州"),
+):
     """
-    大湾区实时气象（OpenWeatherMap）
-    返回风速/风向/能见度 + CREAM 参数建议（Vy, RNP）
+    实时气象（OpenWeatherMap）
+    返回风速/风向/能见度 + CREAM 参数建议（Vy, RNP）；可按 lat/lon 取航线所在地气象
     需配置环境变量 OWM_API_KEY
     """
     try:
-        result = await fetch_gba_weather(route_bearing_deg=bearing)
+        result = await fetch_gba_weather(route_bearing_deg=bearing, lat=lat, lon=lon)
         return result
     except Exception as e:
         logger.exception("气象获取失败")

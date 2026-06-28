@@ -34,12 +34,16 @@ _DEMO_WEATHER = {
 }
 
 
-async def fetch_gba_weather(route_bearing_deg: float = None) -> dict:
+async def fetch_gba_weather(route_bearing_deg: float = None,
+                            lat: float = None, lon: float = None) -> dict:
     """
-    获取大湾区实时气象 + CREAM 参数建议
+    获取实时气象 + CREAM 参数建议
 
     route_bearing_deg: 航路方位角（0=正北，90=正东），用于计算侧风分量
+    lat/lon: 指定查询位置（如航线中点）；缺省时用大湾区（广州）
     """
+    q_lat = lat if lat is not None else GBA_LAT
+    q_lon = lon if lon is not None else GBA_LON
     if not OWM_KEY:
         logger.warning("OWM_API_KEY 未配置，使用演示气象数据")
         result = dict(_DEMO_WEATHER)
@@ -48,7 +52,7 @@ async def fetch_gba_weather(route_bearing_deg: float = None) -> dict:
 
     url = (
         f"https://api.openweathermap.org/data/2.5/weather"
-        f"?lat={GBA_LAT}&lon={GBA_LON}"
+        f"?lat={q_lat}&lon={q_lon}"
         f"&appid={OWM_KEY}&units=metric&lang=zh_cn"
     )
     try:
