@@ -40,6 +40,7 @@ from .engines.complexity_engine import compute_airspace_complexity
 from .engines.crossing_detector import detect_crossings
 from .engines.terrain_engine import compute_terrain_analysis
 from .engines.airspace_engine import check_route_airspace
+from .engines.ground_risk_engine import assess_ground_risk
 from .engines.analytics_engine import (
     log_registration, log_assessment, log_export, get_admin_stats
 )
@@ -523,6 +524,31 @@ def airspace_route_check(req: AirspaceRequest):
         return result
     except Exception as e:
         logger.exception("空域穿越检查失败")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class GroundRiskRequest(BaseModel):
+    """地面风险（GRC）评估请求"""
+    waypoints: List[AirspaceWaypoint] = Field(..., description="航线节点 [{lat,lon}]")
+    ac_type: str = Field("small", description="机型: micro/light/small/medium/large")
+    n_samples: int = Field(100, description="沿线采样点数")
+    controlled: bool = Field(False, description="是否全程受控地面区域")
+    tiny250g: bool = Field(False, description="是否≤250g且≤25m/s（GRC恒为1）")
+
+@app.post("/api/v1/groundrisk/assess")
+def groundrisk_assess(req: GroundRiskRequest):
+    """
+    地面风险等级（GRC）—— 中国民航局《特定类运行风险评估与缓解指南》
+    沿线采样人口密度（WorldPop 2020 1km）→ 人口分级 → 查官方初始地面风险表
+    """
+    try:
+        wps = [{"lat": w.lat, "lon": w.lon} for w in req.waypoints]
+        return assess_ground_risk({
+            "waypoints": wps, "ac_type": req.ac_type, "n_samples": req.n_samples,
+            "controlled": req.controlled, "tiny250g": req.tiny250g,
+        })
+    except Exception as e:
+        logger.exception("地面风险评估失败")
         raise HTTPException(status_code=500, detail=str(e))
 
 
