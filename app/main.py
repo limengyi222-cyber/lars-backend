@@ -41,6 +41,7 @@ from .engines.crossing_detector import detect_crossings
 from .engines.terrain_engine import compute_terrain_analysis
 from .engines.airspace_engine import check_route_airspace
 from .engines.ground_risk_engine import assess_ground_risk
+from .engines.dji_fence_engine import check_dji_fence
 from .engines.analytics_engine import (
     log_registration, log_assessment, log_export, get_admin_stats
 )
@@ -549,6 +550,25 @@ def groundrisk_assess(req: GroundRiskRequest):
         })
     except Exception as e:
         logger.exception("地面风险评估失败")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class DjiFenceRequest(BaseModel):
+    """大疆电子围栏比对请求"""
+    waypoints: List[AirspaceWaypoint] = Field(..., description="航线节点 [{lat,lon}]")
+    n_samples: int = Field(120, description="沿线采样点数")
+
+@app.post("/api/v1/djifence/check")
+def djifence_check(req: DjiFenceRequest):
+    """
+    大疆电子围栏比对 —— 航线是否穿越 DJI 禁飞/限飞/警示区
+    与法定适飞独立；DJI 机对围栏物理强制（禁飞/限高/需解锁）
+    """
+    try:
+        wps = [{"lat": w.lat, "lon": w.lon} for w in req.waypoints]
+        return check_dji_fence({"waypoints": wps, "n_samples": req.n_samples})
+    except Exception as e:
+        logger.exception("大疆围栏比对失败")
         raise HTTPException(status_code=500, detail=str(e))
 
 
