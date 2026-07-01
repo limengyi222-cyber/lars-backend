@@ -94,7 +94,7 @@ def check_dji_fence(params: Dict) -> Dict:
             if _ray(lon, lat, z["ring"]):
                 lv = z["level"]
                 key = z["name"] + "|" + lv
-                hit_names.setdefault(key, {"name": z["name"], "level": lv, "n": 0})
+                hit_names.setdefault(key, {"name": z["name"], "level": lv, "n": 0, "ring": z["ring"]})
                 hit_names[key]["n"] += 1
                 r = LEVEL_RANK.get(lv, 1)
                 if r > worst_rank:
