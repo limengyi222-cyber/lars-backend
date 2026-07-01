@@ -113,7 +113,8 @@ def assess_ground_risk(params: Dict) -> Dict:
     for s in samples:
         d = _density_at(s["lat"], s["lon"])
         b = _band(d)
-        profile.append({"dist_km": s["dist_km"], "density": None if d < 0 else int(d), "band": b})
+        profile.append({"dist_km": s["dist_km"], "lat": round(s["lat"], 6), "lon": round(s["lon"], 6),
+                        "density": None if d < 0 else int(d), "band": b})
         eff_b = b if b != "unknown" else "sparse"  # 无数据保守按稀少
         band_km[eff_b] = band_km.get(eff_b, 0) + 1
         if d > max_density:
