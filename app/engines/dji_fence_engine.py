@@ -1,8 +1,8 @@
 """
-大疆电子围栏引擎 — 航线 × DJI 限飞区比对
+无人机电子围栏引擎 — 航线 × 电子围栏比对
 
-DJI 无人机对电子围栏区物理强制（禁飞/限高/需解锁），是"运行现实"约束：
-即使航线合法适飞，落入 DJI 禁飞/限飞区，大疆机也无法起飞或被限高。
+无人机对电子围栏区物理强制（禁飞/限高/需解锁），是"运行现实"约束：
+即使航线合法适飞，落入禁飞/限飞区，无人机也无法起飞或被限高。
 
 数据：dji_fence_gd.json（广东区域 446 个围栏多边形，含等级）
 等级（严重度由高到低）：限飞/禁飞区 > 加强警示区 > 警示区 > 其它
@@ -16,11 +16,11 @@ logger = logging.getLogger(__name__)
 # 等级严重度排序
 LEVEL_RANK = {"限飞/禁飞区": 3, "加强警示区": 2, "管制区": 2, "限制区": 2, "授权飞行区": 1, "警示区": 1}
 LEVEL_DESC = {
-    "限飞/禁飞区": "大疆机禁飞/限高，物理无法起飞（除非官方解禁）",
+    "限飞/禁飞区": "无人机禁飞/限高，物理无法起飞（除非官方解禁）",
     "加强警示区": "进入需多次确认，强提示",
     "管制区": "管制空域，需授权",
     "限制区": "受限区，需授权",
-    "授权飞行区": "需通过大疆账号解锁授权",
+    "授权飞行区": "需通过厂商账号解锁授权",
     "警示区": "飞行前提示，可飞但注意",
 }
 
@@ -33,9 +33,9 @@ def _load():
     path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "dji_fence_gd.json")
     try:
         _ZONES = json.load(open(path))
-        logger.info(f"大疆围栏加载: {len(_ZONES)} 个")
+        logger.info(f"电子围栏加载: {len(_ZONES)} 个")
     except Exception as e:
-        logger.warning(f"大疆围栏加载失败: {e}")
+        logger.warning(f"电子围栏加载失败: {e}")
         _ZONES = []
     return _ZONES
 
@@ -113,5 +113,5 @@ def check_dji_fence(params: Dict) -> Dict:
         "zones_hit": hits[:12],
         "zones_total": len(hits),
         "fence_count": len(zones),
-        "note": "大疆电子围栏（DJI 机物理强制），与法定适飞相互独立；数据为大疆公开围栏，随时更新，实际以飞行时 App 为准。",
+        "note": "无人机电子围栏（厂商机物理强制），与法定适飞相互独立；数据为公开电子围栏，随时更新，实际以飞行时 App 为准。",
     }
