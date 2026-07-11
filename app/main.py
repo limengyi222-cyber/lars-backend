@@ -95,7 +95,9 @@ def _rate_check(request: Request, limit: int = 30, window: int = 60) -> None:
 # 鉴权依赖（FastAPI Depends）
 # ═══════════════════════════════════════════════════
 
-ADMIN_TOKEN = os.environ.get("LARS_ADMIN_TOKEN", "")
+# 默认令牌 lars8888admin 为向后兼容（重构前的默认值）；
+# ⚠ 本仓库公开，正式使用务必在 Render 环境变量设置 LARS_ADMIN_TOKEN 覆盖此默认值
+ADMIN_TOKEN = os.environ.get("LARS_ADMIN_TOKEN", "lars8888admin")
 
 def get_current_user(authorization: Optional[str] = Header(None)) -> dict:
     """
