@@ -4,7 +4,7 @@
 无人机对电子围栏区物理强制（禁飞/限高/需解锁），是"运行现实"约束：
 即使航线合法适飞，落入禁飞/限飞区，无人机也无法起飞或被限高。
 
-数据：dji_fence_gd.json（广东区域 446 个围栏多边形，含等级）
+数据：dji_fence.json（全量 4207 个围栏多边形，含等级；96% 位于中国境内）
 等级（严重度由高到低）：限飞/禁飞区 > 加强警示区 > 警示区 > 其它
 判定：沿线采样点做多边形包含判断（bbox 预筛 + 射线法），聚合命中围栏与最严等级。
 """
@@ -30,7 +30,7 @@ def _load():
     global _ZONES
     if _ZONES is not None:
         return _ZONES
-    path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "dji_fence_gd.json")
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "dji_fence.json")
     try:
         _ZONES = json.load(open(path))
         logger.info(f"电子围栏加载: {len(_ZONES)} 个")
