@@ -42,6 +42,7 @@ from .engines.terrain_engine import compute_terrain_analysis
 from .engines.airspace_engine import check_route_airspace
 from .engines.ground_risk_engine import assess_ground_risk
 from .engines.dji_fence_engine import check_dji_fence
+from .engines.obstacle_engine import check_obstacles
 from .engines.analytics_engine import (
     log_registration, log_assessment, log_export, get_admin_stats
 )
@@ -560,6 +561,13 @@ class DjiFenceRequest(BaseModel):
     waypoints: List[AirspaceWaypoint] = Field(..., description="航线节点 [{lat,lon}]")
     n_samples: int = Field(120, description="沿线采样点数")
 
+class ObstacleRequest(BaseModel):
+    """障碍物邻近性请求"""
+    waypoints: List[AirspaceWaypoint] = Field(..., description="航线节点 [{lat,lon}]")
+    n_samples: int = Field(100, description="沿线采样点数")
+    radius_km: float = Field(0.5, description="检索半径(km)")
+
+
 @app.post("/api/v1/djifence/check")
 def djifence_check(req: DjiFenceRequest):
     """
@@ -571,6 +579,21 @@ def djifence_check(req: DjiFenceRequest):
         return check_dji_fence({"waypoints": wps, "n_samples": req.n_samples})
     except Exception as e:
         logger.exception("大疆围栏比对失败")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/v1/obstacle/check")
+def obstacle_check(req: ObstacleRequest):
+    """
+    障碍物邻近性 —— 航线附近的高压电塔/桅杆/电力线
+    数据已本地化：原前端实时查 Overpass，公共镜像限流导致该维度经常直接失败
+    """
+    try:
+        wps = [{"lat": w.lat, "lon": w.lon} for w in req.waypoints]
+        return check_obstacles({"waypoints": wps, "n_samples": req.n_samples,
+                                "radius_km": req.radius_km})
+    except Exception as e:
+        logger.exception("障碍物检查失败")
         raise HTTPException(status_code=500, detail=str(e))
 
 
