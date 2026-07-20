@@ -11,10 +11,14 @@ CREAM 碰撞风险计算引擎 — 修正版
   6. HOP: 修正系数 π/4（原 π/16 有误），ratio = 2s/b
   7. K_lat: 修正侧向运动学因子公式
   8. Pz(0): 全程从 TVE 模型计算，不依赖传入常数
+
+修正记录 (v2.2):
+  9. TVE PDF 改全对数空间求值 — 修复 |z| 大时 inf×0=NaN 被兜成 Pz=1.0，
+     导致垂直间隔≥约450m 时风险反向升高（恰命中官方 600/900m 间隔标准）
 """
 import numpy as np
 from scipy import integrate
-from scipy.special import erfc
+from scipy.special import erfc, log_ndtr
 from typing import Dict
 
 
@@ -43,10 +47,9 @@ def _tve_pdf(z: float, sigma_aad: float, b_ase: float) -> float:
     其中:
       α = (z/σ - σ/b) / √2     β = (z/σ + σ/b) / √2
 
-    数值稳定性：
-      - 当 z >> 0：exp(-z/b) 大，但 erfc(-α) = erfc(大正数) ≈ 0，相互抵消
-      - 当 z << 0：exp(z/b) 大，但 erfc(β) = erfc(大正数) ≈ 0，相互抵消
-      → 整个参数范围均无溢出风险
+    数值稳定性（v2.2 修复）：
+      直接按上式求值会在 |z| 较大时 exp 溢出为 inf、erfc 下溢为 0，inf×0 = NaN。
+      故改为全对数空间求值（见下方实现），全参数范围无溢出，大 z 自然下溢为 0。
     """
     # 退化情形
     if b_ase < 1e-10:
@@ -62,10 +65,23 @@ def _tve_pdf(z: float, sigma_aad: float, b_ase: float) -> float:
     # 前置因子：exp(σ²/2b²) / (4b)
     log_scale = s ** 2 / (2.0 * b ** 2)      # 典型值 ~1–5，无溢出
 
-    term1 = np.exp(log_scale - z / b) * float(erfc(-alpha))
-    term2 = np.exp(log_scale + z / b) * float(erfc(beta))
+    # ── 全对数空间求值（修复大 z 溢出）────────────────────────────────────
+    # 原实现直接算 exp(log_scale ± z/b) * erfc(...)：当 z 较大时 exp 溢出为 inf，
+    # 而 erfc 同时下溢为 0，inf×0 = NaN（并非注释所称"相互抵消"）。NaN 经后续
+    # 积分与 clip 被兜成 1.0，导致【垂直间隔越大、重叠概率越大】的反向错误——
+    # 实测 Sz=610m 时 Pz 由 ~0 跳变为 1.0，恰好命中官方 600m 垂直间隔标准。
+    # 改用恒等式 erfc(x) = 2·Φ(-x√2)，以 log_ndtr 在对数域求值，全程无溢出：
+    #   log(term1) = log_scale - z/b + ln2 + log_ndtr( alpha·√2)
+    #   log(term2) = log_scale + z/b + ln2 + log_ndtr(-beta ·√2)
+    # 两项用 logaddexp 合并后再指数化；z 很大时自然下溢为 0（即概率≈0，符合物理）。
+    r2 = np.sqrt(2.0)
+    log_t1 = log_scale - z / b + np.log(2.0) + log_ndtr(alpha * r2)
+    log_t2 = log_scale + z / b + np.log(2.0) + log_ndtr(-beta * r2)
+    val = np.exp(np.logaddexp(log_t1, log_t2)) / (4.0 * b)
 
-    return float(np.clip((term1 + term2) / (4.0 * b), 0.0, None))
+    if not np.isfinite(val):
+        return 0.0
+    return float(np.clip(val, 0.0, None))
 
 
 # ── 重叠概率 ─────────────────────────────────────────────────────────────────

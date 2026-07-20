@@ -303,6 +303,72 @@ def compute_cream(req: CREAMRequest, request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/v1/cream/solve-separation")
+def solve_separation(req: CREAMRequest, request: Request):
+    """
+    风险调控 · 反算达标所需间隔
+    在其余参数不变的前提下，二分求解满足 TLS 所需的最小侧向间隔 Sy 与垂直间隔 Sz。
+
+    为何服务端求解：客户端二分需反复调用计算接口（十余次往返），既慢又易触发限流；
+    此处一次请求内完成，并同时给出"仅调侧向""仅调垂直"两条独立路径。
+
+    返回 None 表示：即使把该方向间隔放到上限，风险仍超标 —— 说明瓶颈不在这个方向
+    （例如垂直间隔过小时，单纯拓宽走廊无法达标），应改用其他调控策略。
+    """
+    _rate_check(request, limit=30, window=60)
+    try:
+        base = req.dict()
+        TLS = 5e-9
+
+        def risk_with(key: str, val: float) -> float:
+            p = dict(base); p[key] = val
+            return compute_3d_risk(p)["total_risk"]
+
+        def bisect(key: str, lo: float, hi: float):
+            """求满足 TLS 的最小值；风险随间隔单调下降"""
+            if risk_with(key, lo) <= TLS:
+                return lo, True          # 当前已达标
+            if risk_with(key, hi) > TLS:
+                return None, False       # 该方向放到上限仍不达标
+            for _ in range(40):
+                mid = (lo + hi) / 2
+                if risk_with(key, mid) > TLS:
+                    lo = mid
+                else:
+                    hi = mid
+            return hi, False
+
+        cur = compute_3d_risk(base)
+        # Sy 单位 NM，上限 10NM(≈18.5km)；Sz 单位 ft，上限 3000ft(≈900m)
+        sy, sy_ok = bisect("Sy", 1e-4, 10.0)
+        sz, sz_ok = bisect("Sz", 1.0, 3000.0)
+
+        return {
+            "current": {
+                "Sy_nm": base["Sy"], "Sy_m": round(base["Sy"] * 1852, 1),
+                "Sz_ft": base["Sz"], "Sz_m": round(base["Sz"] * 0.3048, 1),
+                "total_risk": cur["total_risk"], "tls_ratio": cur["tls_ratio"],
+                "is_compliant": cur["is_compliant"],
+            },
+            "required_lateral": None if sy is None else {
+                "Sy_nm": round(sy, 5), "Sy_m": round(sy * 1852, 1),
+                "already_ok": sy_ok,
+                "delta_m": round((sy - base["Sy"]) * 1852, 1),
+            },
+            "required_vertical": None if sz is None else {
+                "Sz_ft": round(sz, 2), "Sz_m": round(sz * 0.3048, 1),
+                "already_ok": sz_ok,
+                "delta_m": round((sz - base["Sz"]) * 0.3048, 1),
+            },
+            "TLS": TLS,
+            "note": "在其余参数不变前提下反算；某方向返回 null 表示该方向单独调整无法达标，"
+                    "瓶颈在其他维度（总风险 = 侧向 + 纵向 + 垂直，需先解决主导项）。",
+        }
+    except Exception as e:
+        logger.exception("反算间隔失败")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/v1/cream/uav-collision")
 def compute_uav(req: UAVCollisionRequest, request: Request):
     """
