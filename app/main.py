@@ -806,6 +806,46 @@ async def get_weather(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# 进程内地理编码缓存（同一地名不重复外呼；进程重启清零）
+_GEOCODE_CACHE: dict = {}
+
+@app.get("/api/v1/geocode")
+async def geocode(q: str = Query(..., description="地名，如「广州塔」「白云机场」"),
+                  request: Request = None):
+    """
+    地名 → 经纬度（后端代理 OSM Nominatim）
+    原前端直连 Nominatim：每个用户各自外呼，Nominatim 按 IP 限流且强制要求 User-Agent，
+    浏览器请求易被限流/拒绝（与 Overpass 同类问题）。改由后端集中代理：统一 User-Agent、
+    服务端 IP、进程内缓存，稳定得多。命中缓存则不外呼。
+    """
+    if request is not None:
+        _rate_check(request, limit=20, window=60)
+    key = q.strip()
+    if not key:
+        raise HTTPException(status_code=400, detail="地名不能为空")
+    if key in _GEOCODE_CACHE:
+        return _GEOCODE_CACHE[key]
+    from urllib.parse import quote
+    url = ("https://nominatim.openstreetmap.org/search"
+           "?format=json&limit=1&accept-language=zh-CN&q=" + quote(key))
+    try:
+        async with httpx.AsyncClient(timeout=12) as client:
+            resp = await client.get(
+                url, headers={"User-Agent": "LARS/2.0 (low-altitude route safety; contact: admin)"})
+        arr = resp.json() if resp.status_code == 200 else []
+        if not arr:
+            return {"found": False, "q": key}
+        top = arr[0]
+        out = {"found": True, "q": key,
+               "lat": float(top["lat"]), "lon": float(top["lon"]),
+               "name": ",".join((top.get("display_name") or "").split(",")[:3])}
+        _GEOCODE_CACHE[key] = out
+        return out
+    except Exception as e:
+        logger.warning(f"地理编码失败: {e}")
+        return {"found": False, "q": key, "error": "geocode_unavailable"}
+
+
 # ═══════════════════════════════════════════════════
 # 评估历史
 # ═══════════════════════════════════════════════════

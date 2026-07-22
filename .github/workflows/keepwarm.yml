@@ -1,0 +1,21 @@
+# 定时唤醒 Render 免费实例，避免 15 分钟无访问休眠导致的 ~30s 冷启动。
+# 每 10 分钟 ping 一次 /health（curl 开销可忽略，不消耗有意义的 Actions 额度）。
+# 注：GitHub 对超过 60 天无提交的仓库会自动停用定时任务，届时推一次提交即可恢复。
+name: keep-warm
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch: {}
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping LARS backend health
+        run: |
+          for i in 1 2 3; do
+            code=$(curl -s -m 60 -o /dev/null -w "%{http_code}" https://lars-backend.onrender.com/health || echo 000)
+            echo "attempt $i -> HTTP $code"
+            [ "$code" = "200" ] && exit 0
+            sleep 20
+          done
+          echo "backend did not return 200 after retries"; exit 0   # 不让唤醒失败标红告警
