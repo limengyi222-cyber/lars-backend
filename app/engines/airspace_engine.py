@@ -20,106 +20,118 @@ from typing import List, Dict, Tuple
 
 # ── 常量 ──────────────────────────────────────────────
 BUCKET_SIZE = 0.1          # 度，约 11km
+MASK_SIZE   = 0.25         # 覆盖掩膜粗网格 ≈25km
 
-# 已收录省份网格文件（新增省份只需在此登记）
-PROVINCE_FILES = [
-    ("广东", "gba_grids.json"),
-    ("四川", "sc_grids.json"),
+# ── 省份登记表（方案A · 按需分省加载）─────────────────────────────
+# 全量并入会撑爆内存（约254万格→内存~400MB，Render免费层512MB必OOM）。
+# 故只登记元数据（文件名、粗 bbox、格数），【不预加载】；查询命中哪个省才加载哪个省，
+# 并以 LRU 淘汰常驻省份，内存峰值恒定在 _MAX_RESIDENT 个省以内。
+# 新增省份：生成其 <省>_grids.json 放入后端根目录，在此加一行 _reg(...) 即可。
+#   bbox = [W,S,E,N] 由该省网格实测得出；count 为格数（供前端显示网络规模）。
+def _reg(name, file, bbox, count, pin=False):
+    return {"name": name, "file": file, "bbox": bbox, "count": count, "pin": pin}
+
+PROVINCES = [
+    _reg("广东", "gba_grids.json", [109.677, 20.213, 117.175, 25.520], 133022, pin=True),
+    _reg("四川", "sc_grids.json",  [97.347, 26.049, 108.544, 34.316], 237232),
 ]
+_MAX_RESIDENT = 3          # 常驻省份数上限（含 pin 的广东）；超出按 LRU 淘汰。
+                           # 实测单省网格约 100MB 量级，3 省峰值 ~300MB，为 Render 512MB 留足余量
 
-# ── 单例缓存 ──────────────────────────────────────────
-_GRIDS: List[List[float]] = []           # [[minLon,minLat,maxLon,maxLat], ...]
-_BUCKETS: Dict[Tuple, List[int]] = {}    # (bi, bj) -> [grid_idx, ...]
-_COVERAGE: List[Dict] = []               # [{name, bbox:[W,S,E,N], count}] 各省实测覆盖范围
-# 覆盖掩膜：粗网格(0.25°≈25km)中"有适飞格存在"的单元。用它替代省 bbox 判覆盖——
-# 省界不是矩形：四川 bbox 会吞掉贵州/云南/重庆一角，导致无数据地区被谎报为"需申请"。
-MASK_SIZE = 0.25
-_MASK: set = set()
-_LOADED = False
+# ── 每省独立缓存 ──────────────────────────────────────
+# _PROV[name] = {"grids":[...], "buckets":{...}, "mask":set(), "coverage":{...}}
+_PROV: Dict[str, Dict] = {}
+_LRU: List[str] = []       # 访问顺序，队尾最新
+
+
+def _load_province(name: str) -> Dict:
+    """加载单个省网格（含桶索引与覆盖掩膜）；已在内存则直接返回。"""
+    if name in _PROV:
+        return _PROV[name]
+    meta = next((p for p in PROVINCES if p["name"] == name), None)
+    if meta is None:
+        return None
+    root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+    path = os.path.join(root, meta["file"])
+    if not os.path.exists(path):
+        return None
+    with open(path, "r") as f:
+        gs = json.load(f)["grids"]
+
+    buckets: Dict[Tuple, List[int]] = {}
+    mask: set = set()
+    for idx, g in enumerate(gs):
+        min_lon, min_lat, max_lon, max_lat = g
+        for bi in range(int(min_lon / BUCKET_SIZE), int(max_lon / BUCKET_SIZE) + 1):
+            for bj in range(int(min_lat / BUCKET_SIZE), int(max_lat / BUCKET_SIZE) + 1):
+                buckets.setdefault((bi, bj), []).append(idx)
+        for mi in range(int(min_lon / MASK_SIZE), int(max_lon / MASK_SIZE) + 1):
+            for mj in range(int(min_lat / MASK_SIZE), int(max_lat / MASK_SIZE) + 1):
+                mask.add((mi, mj))
+
+    _PROV[name] = {"grids": gs, "buckets": buckets, "mask": mask,
+                   "coverage": {"name": name, "bbox": meta["bbox"], "count": len(gs)}}
+    _LRU.append(name)
+    _evict()
+    return _PROV[name]
+
+
+def _evict():
+    """LRU 淘汰：常驻省份数超上限时，释放最久未用的【非 pin】省份。"""
+    pinned = {p["name"] for p in PROVINCES if p["pin"]}
+    while len([n for n in _LRU if n not in pinned]) > (_MAX_RESIDENT - len(pinned)):
+        for i, n in enumerate(_LRU):
+            if n not in pinned:
+                _LRU.pop(i)
+                _PROV.pop(n, None)
+                break
+
+
+def _touch(name: str):
+    if name in _LRU:
+        _LRU.remove(name); _LRU.append(name)
+
+
+def _provinces_for_point(lon: float, lat: float) -> List[Dict]:
+    """按登记 bbox 找出可能包含该点的省份（省界重叠时可能多个）。"""
+    return [p for p in PROVINCES
+            if p["bbox"][0] <= lon <= p["bbox"][2] and p["bbox"][1] <= lat <= p["bbox"][3]]
 
 
 def _load_grids():
-    global _GRIDS, _BUCKETS, _COVERAGE, _MASK, _LOADED
-    if _LOADED:
-        return
-
-    root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-    for prov, fname in PROVINCE_FILES:
-        path = os.path.join(root, fname)
-        if not os.path.exists(path):
-            continue
-        with open(path, "r") as f:
-            data = json.load(f)
-        gs = data["grids"]
-        base = len(_GRIDS)
-        _GRIDS.extend(gs)
-
-        # 覆盖范围由该省网格实测得出（不写死常量）
-        _COVERAGE.append({
-            "name": prov,
-            "bbox": [min(g[0] for g in gs), min(g[1] for g in gs),
-                     max(g[2] for g in gs), max(g[3] for g in gs)],
-            "count": len(gs),
-        })
-
-        # 构建空间桶索引
-        for k, g in enumerate(gs):
-            idx = base + k
-            min_lon, min_lat, max_lon, max_lat = g
-            for bi in range(int(min_lon / BUCKET_SIZE), int(max_lon / BUCKET_SIZE) + 1):
-                for bj in range(int(min_lat / BUCKET_SIZE), int(max_lat / BUCKET_SIZE) + 1):
-                    _BUCKETS.setdefault((bi, bj), []).append(idx)
-            # 覆盖掩膜
-            for mi in range(int(min_lon / MASK_SIZE), int(max_lon / MASK_SIZE) + 1):
-                for mj in range(int(min_lat / MASK_SIZE), int(max_lat / MASK_SIZE) + 1):
-                    _MASK.add((mi, mj))
-
-    _LOADED = True
-
-
-def _is_covered(lon: float, lat: float) -> bool:
-    """
-    是否落在已收录省份的实际数据覆盖内。
-    以适飞格占用掩膜(0.25°)判定并向外膨胀1格(≈25-50km容差)，贴合省界实际形状；
-    省内成片非适飞区(城区/机场等，通常远小于该容差)仍算已覆盖 → 判"需申请"；
-    完全没有数据的省份(如贵州)则如实返回未覆盖 → 判"无数据/需人工核查"。
-    """
-    mi, mj = int(lon / MASK_SIZE), int(lat / MASK_SIZE)
-    for di in (-1, 0, 1):
-        for dj in (-1, 0, 1):
-            if (mi + di, mj + dj) in _MASK:
-                return True
-    return False
-
-
-def _covering_province(lon: float, lat: float) -> str:
-    """点落在哪个已收录省份的 bbox 内（仅用于标注省名）"""
-    for c in _COVERAGE:
-        w, s_, e, n = c["bbox"]
-        if w <= lon <= e and s_ <= lat <= n:
-            return c["name"]
-    return ""
+    """兼容旧接口：预热 pin 省份（广东），其余按需加载。"""
+    for p in PROVINCES:
+        if p["pin"]:
+            _load_province(p["name"])
 
 
 def _point_in_grids(lon: float, lat: float) -> str:
     """
-    判断点 (lon, lat) 的空域状态
-    返回: 'flyable' | 'restricted' | 'no_data'
+    判断点 (lon, lat) 的空域状态：'flyable' | 'restricted' | 'no_data'
+    只加载该点 bbox 命中的省份（按需），内存不随省份总数增长。
     """
-    # 超出已收录省份的实际数据覆盖
-    if not _is_covered(lon, lat):
-        return "no_data"
+    cands = _provinces_for_point(lon, lat)
+    if not cands:
+        return "no_data"                    # 不在任何已登记省份的范围内
 
-    bi = int(lon / BUCKET_SIZE)
-    bj = int(lat / BUCKET_SIZE)
-    candidates = _BUCKETS.get((bi, bj), [])
-
-    for idx in candidates:
-        g = _GRIDS[idx]
-        if g[0] <= lon <= g[2] and g[1] <= lat <= g[3]:
-            return "flyable"
-
-    return "restricted"
+    covered = False
+    for meta in cands:
+        P = _load_province(meta["name"])
+        if P is None:
+            continue
+        _touch(meta["name"])
+        # 覆盖掩膜（0.25°膨胀1格）——贴合省界实际形状，避免 bbox 吞掉邻省一角
+        mi, mj = int(lon / MASK_SIZE), int(lat / MASK_SIZE)
+        in_mask = any((mi + di, mj + dj) in P["mask"] for di in (-1, 0, 1) for dj in (-1, 0, 1))
+        if not in_mask:
+            continue
+        covered = True
+        bi, bj = int(lon / BUCKET_SIZE), int(lat / BUCKET_SIZE)
+        for idx in P["buckets"].get((bi, bj), []):
+            g = P["grids"][idx]
+            if g[0] <= lon <= g[2] and g[1] <= lat <= g[3]:
+                return "flyable"
+    return "restricted" if covered else "no_data"
 
 
 # ── 主函数 ────────────────────────────────────────────
@@ -236,6 +248,7 @@ def check_route_airspace(params: Dict) -> Dict:
         "coverage_pct":   coverage_pct,
         "verdict":        verdict,
         "total_samples":  total,
-        "grids_loaded":   len(_GRIDS),
-        "provinces":      [{"name": c["name"], "count": c["count"]} for c in _COVERAGE],
+        "grids_loaded":   sum(p["count"] for p in PROVINCES),   # 登记的网格总量（网络规模）
+        "provinces":      [{"name": p["name"], "count": p["count"],
+                            "resident": p["name"] in _PROV} for p in PROVINCES],
     }
